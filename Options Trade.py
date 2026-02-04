@@ -7,10 +7,8 @@ import numpy as np
 import warnings
 import time
 import sys
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 warnings.filterwarnings('ignore')
+# Añadir después de las otras importaciones
 from scipy.stats import norm
 import math
 import plotly.graph_objects as go
@@ -18,95 +16,11 @@ from plotly.subplots import make_subplots
 import plotly.express as px
 
 # ============================================================================
-# CONFIGURACIÓN DE SESIÓN HTTP CON HEADERS (EVITA BLOQUEOS)
+# CONFIGURACIÓN DE RATE LIMITING
 # ============================================================================
-def crear_sesion_yfinance():
-    """
-    Crea una sesión HTTP con headers que Yahoo Finance acepta.
-    Esto evita bloqueos por 'bot detection'
-    """
-    session = requests.Session()
-    
-    # Headers que simulan un navegador real
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0',
-    })
-    
-    # Configurar reintentos automáticos
-    retry_strategy = Retry(
-        total=5,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]
-    )
-    
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    return session
-
-# Crear sesión global para yfinance
-print("🔧 Inicializando sesión anti-bloqueo...")
-YF_SESSION = crear_sesion_yfinance()
-# ============================================================================
-# CONFIGURACIÓN DE SESIÓN HTTP CON HEADERS (EVITA BLOQUEOS)
-# ============================================================================
-def crear_sesion_yfinance():
-    """
-    Crea una sesión HTTP con headers que Yahoo Finance acepta.
-    Esto evita bloqueos por 'bot detection'
-    """
-    session = requests.Session()
-    
-    # Headers que simulan un navegador real
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0',
-    })
-    
-    # Configurar reintentos automáticos
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]
-    )
-    
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    return session
-
-# Crear sesión global para yfinance
-YF_SESSION = crear_sesion_yfinance()
-
-# ============================================================================
-# CONFIGURACIÓN DE RATE LIMITING (AUMENTADA PARA EVITAR BLOQUEOS)
-# ============================================================================
-DELAY_ENTRE_REQUESTS = 5  # Aumentado a 5 segundos
-MAX_REINTENTOS = 5        # Más reintentos
-DELAY_REINTENTO = 10      # Más espera entre reintentos
+DELAY_ENTRE_REQUESTS = 2  # segundos entre llamadas a Yahoo Finance
+MAX_REINTENTOS = 3
+DELAY_REINTENTO = 5  # segundos de espera si falla
 
 def esperar_rate_limit(segundos=DELAY_ENTRE_REQUESTS):
     """Pausa para evitar rate limiting"""
@@ -121,25 +35,14 @@ def reintentar_con_backoff(func, *args, max_intentos=MAX_REINTENTOS, **kwargs):
             resultado = func(*args, **kwargs)
             return resultado
         except Exception as e:
-            error_str = str(e).lower()
-            if "rate" in error_str or "429" in error_str or "blocked" in error_str or "forbidden" in error_str:
+            if "Rate" in str(e) or "429" in str(e):
                 if intento < max_intentos - 1:
                     espera = DELAY_REINTENTO * (2 ** intento)
                     print(f"\n⚠️  Rate limit detectado. Reintento {intento + 1}/{max_intentos} en {espera}s...")
                     time.sleep(espera)
                 else:
-                    print(f"\n{'='*80}")
-                    print(f"❌ BLOQUEO PERSISTENTE DE YAHOO FINANCE")
-                    print(f"{'='*80}")
-                    print(f"Posibles soluciones:")
-                    print(f"1. Tu IP puede estar bloqueada temporalmente (espera 30-60 minutos)")
-                    print(f"2. Cambia de red WiFi o usa datos móviles")
-                    print(f"3. Usa VPN (ProtonVPN, Windscribe, etc.)")
-                    print(f"4. Limpia caché: rm -rf ~/.cache/py-yfinance")
-                    print(f"5. Actualiza yfinance: pip install yfinance --upgrade")
-                    print(f"{'='*80}\n")
-                    raise Exception(f"Rate limit persistente después de {max_intentos} intentos. "
-                                    f"Yahoo Finance bloqueó tu IP/sesión.")
+                    raise Exception(f"❌ Rate limit persistente después de {max_intentos} intentos. "
+                                    f"Espera 5-10 minutos y vuelve a intentar.")
             else:
                 raise e
 
@@ -150,14 +53,10 @@ def obtener_vencimiento_optimo(ticker):
     """Obtiene el vencimiento más cercano con protección contra rate limit"""
     try:
         print(f"📡 Conectando con Yahoo Finance para {ticker}...")
-        print(f"   (Usando headers anti-bloqueo + sesión personalizada...)")
-        
-        # CRÍTICO: Pasar la sesión personalizada a yfinance
-        activo = yf.Ticker(ticker, session=YF_SESSION)
+        activo = yf.Ticker(ticker)
         
         # Primera llamada: obtener expiraciones
-        print(f"   Obteniendo vencimientos disponibles...")
-        esperar_rate_limit(3)  # Delay inicial mayor
+        esperar_rate_limit()
         expiraciones = reintentar_con_backoff(lambda: activo.options)
         
         if not expiraciones:
@@ -182,16 +81,12 @@ def obtener_vencimiento_optimo(ticker):
         return activo, candidatos[0][0], candidatos[0][1]
         
     except Exception as e:
-        error_str = str(e).lower()
-        if "rate" in error_str or "429" in error_str or "blocked" in error_str:
+        if "Rate" in str(e) or "429" in str(e):
             print(f"\n❌ ERROR: Yahoo Finance está bloqueando las peticiones.")
-            print(f"   Error específico: {e}")
-            print(f"\n   📋 CHECKLIST DE SOLUCIONES:")
-            print(f"   □ ¿Actualizaste yfinance? → pip install yfinance --upgrade")
-            print(f"   □ ¿Limpiaste el caché? → rm -rf ~/.cache/py-yfinance")
-            print(f"   □ ¿Esperaste 30+ minutos desde el último intento?")
-            print(f"   □ ¿Probaste desde otra red/VPN?")
-            print(f"   □ ¿Verificaste que el ticker existe? (prueba con SPY o AAPL)")
+            print(f"   Soluciones:")
+            print(f"   1. Espera 5-10 minutos antes de volver a intentar")
+            print(f"   2. Verifica tu conexión a internet")
+            print(f"   3. Si persiste, Yahoo puede tener restricciones temporales")
             sys.exit(1)
         else:
             raise e
@@ -199,42 +94,24 @@ def obtener_vencimiento_optimo(ticker):
 def obtener_datos_opciones(activo, vencimiento):
     """Obtiene cadena de opciones con protección"""
     print(f"📊 Descargando datos de opciones para {vencimiento}...")
-    esperar_rate_limit(4)  # Delay mayor
+    esperar_rate_limit()
     
     cadena = reintentar_con_backoff(lambda: activo.option_chain(vencimiento))
-    print(f"   ✅ Cadena descargada correctamente")
     return cadena.calls.copy(), cadena.puts.copy()
 
 def obtener_precio_actual(activo):
     """Obtiene precio actual con protección"""
     print(f"💰 Obteniendo precio actual...")
-    esperar_rate_limit(3)
+    esperar_rate_limit()
     
-    try:
-        # Intentar primero con info (más rápido y menos propenso a bloqueos)
-        info = reintentar_con_backoff(lambda: activo.info)
-        if 'currentPrice' in info:
-            precio = info['currentPrice']
-            print(f"   ✅ Precio obtenido: ${precio:.2f}")
-            return precio
-        elif 'regularMarketPrice' in info:
-            precio = info['regularMarketPrice']
-            print(f"   ✅ Precio obtenido: ${precio:.2f}")
-            return precio
-    except:
-        print(f"   ⚠️  Método info falló, usando historial...")
-    
-    # Fallback: historial
     historia = reintentar_con_backoff(lambda: activo.history(period="1d"))
     if historia.empty:
         raise Exception("No se pudo obtener el precio actual")
     
-    precio = historia['Close'].iloc[-1]
-    print(f"   ✅ Precio obtenido: ${precio:.2f}")
-    return precio
+    return historia['Close'].iloc[-1]
 
 # ============================================================================
-# FUNCIONES DE ANÁLISIS
+# FUNCIONES DE ANÁLISIS (SIN CAMBIOS)
 # ============================================================================
 def calcular_max_pain(calls, puts):
     strikes = sorted(set(calls['strike']) | set(puts['strike']))
@@ -272,20 +149,7 @@ def ratio_put_call_strike(calls, puts):
     ].head(8)
 
 def identificar_gamma_walls(calls, puts, precio_actual):
-    """
-    Identifica strikes con alta exposición gamma.
-    
-    Gamma walls son niveles donde market makers tienen grandes posiciones
-    que requieren delta hedging continuo. Esto puede crear:
-    - Soporte temporal (MM compran cuando el precio cae hacia el strike)
-    - Resistencia temporal (MM venden cuando el precio sube hacia el strike)
-    
-    IMPORTANTE: 
-    - NO son barreras infranqueables
-    - NO predicen reversiones
-    - Son zonas de actividad técnica aumentada
-    - Más relevante cerca del vencimiento
-    """
+    """Detecta strikes donde los MM deben cubrir agresivamente"""
     
     calls_clean = calls[['strike', 'openInterest', 'impliedVolatility']].dropna()
     puts_clean = puts[['strike', 'openInterest', 'impliedVolatility']].dropna()
@@ -356,17 +220,8 @@ def posicionamiento_dealers(calls, puts):
     
     return status, net_gamma, comportamiento
 
-def detectar_flujo_institucional(calls, puts):
-    """
-    Identifica volumen alto en opciones con IV elevada.
-    
-    IMPORTANTE: Esto NO indica dirección ni intención:
-    - Puede ser cobertura (hedging), no especulación
-    - Puede ser parte de spreads complejos
-    - Institucionales compran puts para proteger portafolios largos
-    
-    Usa esto para identificar actividad inusual, no para predecir movimientos.
-    """
+def detectar_smart_money(calls, puts):
+    """Identifica compras agresivas de opciones caras (institucionales)"""
     
     calls_clean = calls[['strike', 'volume', 'openInterest', 'impliedVolatility', 'lastPrice']].dropna()
     puts_clean = puts[['strike', 'volume', 'openInterest', 'impliedVolatility', 'lastPrice']].dropna()
@@ -404,7 +259,7 @@ def ajustar_por_vencimiento(dias_restantes, max_pain, precio_actual):
     if dias_restantes <= 2:
         peso_max_pain = 0.8
         icono = "⚠️ "
-        mensaje = "VENCIMIENTO INMEDIATO: Max Pain puede tener influencia fuerte"
+        mensaje = "VENCIMIENTO INMEDIATO: Max Pain es imán MUY fuerte"
         urgencia = "CRÍTICO"
     elif dias_restantes <= 5:
         peso_max_pain = 0.5
@@ -481,81 +336,6 @@ def strike_mayor_probabilidad(calls, puts, precio_actual, max_pain, peso_max_pai
             mejor_strike = strike
     
     return mejor_strike, mejor_score
-# ============================================================================
-# FUNCIONES DE PROBABILIDAD ITM (CORREGIDAS)
-# ============================================================================
-
-def calc_prob_itm_call(strike, precio, iv, dias):
-    """
-    Probabilidad de que una CALL expire ITM
-    Usa distribución log-normal del precio del activo
-    """
-    if dias <= 0:
-        return 100.0 if precio > strike else 0.0
-    if iv <= 0 or iv > 5:  # IV irreal
-        iv = 0.3
-    
-    try:
-        T = dias / 365.0
-        # Black-Scholes: d2 determina probabilidad ITM
-        d1 = (np.log(precio / strike) + (0.5 * iv**2) * T) / (iv * np.sqrt(T))
-        d2 = d1 - iv * np.sqrt(T)
-        
-        # Para CALL: P(S_T > K) = N(d2)
-        prob = norm.cdf(d2) * 100
-        return max(0, min(100, prob))  # Clamp entre 0-100
-    except:
-        # Fallback: aproximación lineal
-        dist_pct = abs(strike - precio) / precio
-        if precio > strike:
-            return max(50, 100 - (dist_pct * 200))
-        else:
-            return max(0, 50 - (dist_pct * 200))
-
-def calc_prob_itm_put(strike, precio, iv, dias):
-    """
-    Probabilidad de que una PUT expire ITM
-    """
-    if dias <= 0:
-        return 100.0 if precio < strike else 0.0
-    if iv <= 0 or iv > 5:
-        iv = 0.3
-    
-    try:
-        T = dias / 365.0
-        d1 = (np.log(precio / strike) + (0.5 * iv**2) * T) / (iv * np.sqrt(T))
-        d2 = d1 - iv * np.sqrt(T)
-        
-        # Para PUT: P(S_T < K) = N(-d2)
-        prob = norm.cdf(-d2) * 100
-        return max(0, min(100, prob))
-    except:
-        dist_pct = abs(strike - precio) / precio
-        if precio < strike:
-            return max(50, 100 - (dist_pct * 200))
-        else:
-            return max(0, 50 - (dist_pct * 200))
-
-def calc_prob_itm_promedio(strike, precio, iv, dias):
-    """
-    Probabilidad promedio (para cuando no sabemos si es call o put)
-    Usa el promedio ponderado de ambas
-    """
-    prob_call = calc_prob_itm_call(strike, precio, iv, dias)
-    prob_put = calc_prob_itm_put(strike, precio, iv, dias)
-    
-    # Si estamos ATM, ambas tienen ~50%
-    # Si estamos OTM para calls, ITM para puts (y viceversa)
-    if abs(strike - precio) / precio < 0.02:  # ±2% = ATM
-        return 50.0
-    elif strike > precio:  # OTM call, ITM put
-        return prob_put  # Usamos la put que es ITM
-    else:  # ITM call, OTM put
-        return prob_call  # Usamos la call que es ITM
-
-# ============================================================================
-# DASHBOARD INTERACTIVO
-# ============================================================================
 
 def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_strike, dias_restantes, ticker):
     """
@@ -616,8 +396,25 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
     gamma_df['iv_avg'] = gamma_df['iv_avg'].replace(0, 0.3)
     
     # Probabilidad ITM corregida
+    def calc_prob_itm(strike, precio, iv, dias):
+        if dias <= 0:
+            return 100.0 if strike <= precio else 0.0
+        if iv <= 0:
+            iv = 0.3
+        try:
+            from scipy.stats import norm
+            T = dias / 365.0
+            d2 = (np.log(precio / strike)) / (iv * np.sqrt(T))
+            if strike <= precio:
+                return norm.cdf(d2) * 100
+            else:
+                return norm.cdf(-d2) * 100
+        except:
+            dist_pct = abs(strike - precio) / precio
+            return max(0, 100 - (dist_pct * 500))
+    
     gamma_df['prob_itm'] = gamma_df.apply(
-        lambda r: calc_prob_itm_promedio(r['strike'], precio_actual, r['iv_avg'], dias_restantes), axis=1
+        lambda r: calc_prob_itm(r['strike'], precio_actual, r['iv_avg'], dias_restantes), axis=1
     )
     
     # Sentimiento
@@ -642,10 +439,10 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
     fig1 = make_subplots(
         rows=4, cols=1,
         subplot_titles=(
-            '1️⃣ NET GAMMA PROFILE (Exposición Institucional)',
+            '1️⃣ NET GAMMA PROFILE (Muros Institucionales)',
             '2️⃣ VOLUMEN vs OPEN INTEREST (Flujo vs Posiciones)',
             '3️⃣ VOL/OI RATIO (Detección de Aperturas)',
-            '4️⃣ FLUJO INSTITUCIONAL (Premium Pagado)'
+            '4️⃣ SMART MONEY FLOW (Premium Pagado)'
         ),
         vertical_spacing=0.08,
         row_heights=[0.3, 0.25, 0.2, 0.25]
@@ -762,7 +559,7 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
     
     if mejor_strike:
         fig1.add_vline(x=mejor_strike, line=dict(color='magenta', width=2, dash='dot'),
-                      annotation_text=f"Nivel clave: ${mejor_strike:.2f}", row=4, col=1)
+                      annotation_text=f"Testeo: ${mejor_strike:.2f}", row=4, col=1)
     
     # Layout Gráfico 1
     fig1.update_layout(
@@ -793,9 +590,9 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
     fig2 = make_subplots(
         rows=3, cols=1,
         subplot_titles=(
-            '1️⃣ PROBABILIDAD ITM (Viabilidad Estadística de Strikes)',
+            '1️⃣ PROBABILIDAD ITM (Viabilidad de Strikes)',
             '2️⃣ IMPLIED VOLATILITY SURFACE (Opciones Caras vs Baratas)',
-            '3️⃣ PRICE ACTION ZONES (Zonas Técnicas de Referencia)'
+            '3️⃣ PRICE ACTION ZONES (Zonas de Operación)'
         ),
         vertical_spacing=0.12,
         row_heights=[0.35, 0.3, 0.35]
@@ -948,8 +745,9 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
     print(f"   - Hover: Pasa el ratón sobre las barras")
     print(f"   - Reset: Doble click")
     print(f"{'='*80}\n")
-    # =============================================================================
-# MAIN (CON MANEJO DE ERRORES Y DISCLAIMERS CORRECTOS)
+    
+# =============================================================================
+# MAIN (CON MANEJO DE ERRORES MEJORADO)
 # =============================================================================
 def main(ticker):
     print(f"\n{'='*80}")
@@ -983,13 +781,12 @@ def main(ticker):
         peso_max_pain, mensaje_venc, urgencia, presion = ajustar_por_vencimiento(dias_restantes, max_pain, precio_actual)
         
         distancia = precio_actual - max_pain
-        direccion_mp = 'por encima' if distancia > 0 else 'por debajo'
+        direccion_mp = 'ALCISTA' if distancia < 0 else 'BAJISTA'
         
         print(f"{'='*80}")
-        print(f"📊 MAX PAIN: ${max_pain:.2f} | Precio está {direccion_mp} (${abs(distancia):.2f})")
+        print(f"📊 MAX PAIN: ${max_pain:.2f} | Distancia: {distancia:+.2f} ({direccion_mp})")
         print(f"{mensaje_venc}")
-        print(f"   Relevancia temporal: {urgencia} | Distancia: {presion}")
-        print(f"   ℹ️  Max Pain NO es predicción - es un nivel técnico de referencia")
+        print(f"   Urgencia: {urgencia} | Presión gravitacional: {presion}")
         print(f"{'='*80}\n")
         
         status_gamma, net_gamma, comportamiento = posicionamiento_dealers(calls, puts)
@@ -999,56 +796,45 @@ def main(ticker):
         print(f"Status: {status_gamma}")
         print(f"Net Gamma: {net_gamma:,.0f}")
         print(f"Comportamiento esperado: {comportamiento}")
-        print(f"Curvatura local: {curvatura_gamma(calls, puts, precio_actual)}")
-        print(f"   ℹ️  Esto indica magnitud de movimientos, NO dirección\n")
+        print(f"Curvatura local: {curvatura_gamma(calls, puts, precio_actual)}\n")
         
         print(f"{'='*80}")
-        print(f"🧱 GAMMA WALLS (Niveles con Alta Exposición Gamma)")
+        print(f"🧱 GAMMA WALLS (Muros Institucionales)")
         print(f"{'='*80}")
-        print(f"⚠️  Estos NO son muros infranqueables - son zonas de actividad técnica")
         gamma_walls = identificar_gamma_walls(calls, puts, precio_actual)
         if not gamma_walls.empty:
             print(gamma_walls.to_string(index=False))
-            print(f"\n💡 Interpretación:")
-            print(f"   • SOPORTE: MM pueden comprar si precio cae hacia ese strike")
-            print(f"   • RESISTENCIA: MM pueden vender si precio sube hacia ese strike")
-            print(f"   • Efecto más fuerte cerca del vencimiento")
-            print(f"   • NO garantiza reversión - el precio puede romper estos niveles")
         else:
-            print("   — No se detectaron niveles significativos en el rango ATM —")
+            print("   — No se detectaron muros significativos —")
         print()
         
         print(f"{'='*80}")
-        print(f"📈 PUT/CALL RATIO POR STRIKE (Sentimiento de Mercado)")
+        print(f"📈 PUT/CALL RATIO POR STRIKE (Sentimiento Institucional)")
         print(f"{'='*80}")
         pc_analysis = ratio_put_call_strike(calls, puts)
         if not pc_analysis.empty:
             print(pc_analysis.to_string(index=False))
             print("\n   Interpretación:")
-            print("   • Ratio > 1.5 = Más actividad en puts (cobertura/protección)")
-            print("   • Ratio < 0.7 = Más actividad en calls (posicionamiento alcista)")
-            print("   ⚠️  NO asumas dirección - puede ser hedging, no especulación")
+            print("   • Ratio > 1.5 = Cobertura bajista (protección institucional)")
+            print("   • Ratio < 0.7 = Apuesta alcista agresiva")
         else:
             print("   — No hay datos suficientes —")
         print()
         
         print(f"{'='*80}")
-        print(f"💰 FLUJO INSTITUCIONAL DETECTADO (Vol × IV × Premium)")
+        print(f"💰 SMART MONEY DETECTION (Flujos Institucionales)")
         print(f"{'='*80}")
-        print(f"⚠️  NOTA: Puede ser cobertura, arbitraje o especulación - no asumas dirección")
-        flujo_calls, flujo_puts = detectar_flujo_institucional(calls, puts)
+        smart_calls, smart_puts = detectar_smart_money(calls, puts)
         
-        print("\nCALLS con flujo institucional:")
-        print("(NO necesariamente alcista - puede ser cobertura de cortos)")
-        if not flujo_calls.empty:
-            print(flujo_calls.to_string(index=False))
+        print("CALLS institucionales (apuestas alcistas):")
+        if not smart_calls.empty:
+            print(smart_calls.to_string(index=False))
         else:
             print("   — No detectado —")
         
-        print("\nPUTS con flujo institucional:")
-        print("(NO necesariamente bajista - puede ser protección de portafolio)")
-        if not flujo_puts.empty:
-            print(flujo_puts.to_string(index=False))
+        print("\nPUTS institucionales (cobertura/apuestas bajistas):")
+        if not smart_puts.empty:
+            print(smart_puts.to_string(index=False))
         else:
             print("   — No detectado —")
         print()
@@ -1068,93 +854,70 @@ def main(ticker):
         mejor_strike, score = strike_mayor_probabilidad(calls, puts, precio_actual, max_pain, peso_max_pain)
         
         print(f"\n{'='*80}")
-        print(f"📍 STRIKE CON MAYOR ACTIVIDAD PONDERADA (NO ES PREDICCIÓN)")
+        print(f"🎯 STRIKE DE MAYOR PROBABILIDAD DE TESTEO")
         print(f"{'='*80}")
         if mejor_strike:
             dist = mejor_strike - precio_actual
-            direccion = "por encima" if dist > 0 else "por debajo"
-            tipo = "POTENCIAL SOPORTE" if dist < 0 else "POTENCIAL RESISTENCIA" if dist > 0 else "EN PRECIO ACTUAL"
-            print(f"\nStrike identificado: ${mejor_strike:.2f}")
-            print(f"Ubicación: {direccion} del precio (${abs(dist):.2f})")
-            print(f"Clasificación: {tipo}")
-            print(f"Score de actividad: {score:.1f}/300")
-            print(f"\n💡 Interpretación:")
-            print(f"   • Este strike tiene alta actividad (volumen + OI + proximidad)")
-            print(f"   • Puede actuar como nivel técnico relevante")
-            print(f"   • NO predice que el precio llegará ahí")
-            print(f"   • Úsalo como referencia para stops/targets, no como señal de entrada")
+            direccion = "↑ alcista" if dist > 0 else "↓ bajista"
+            tipo = "SOPORTE" if dist < 0 else "RESISTENCIA" if dist > 0 else "EN PRECIO"
+            print(f"Strike: ${mejor_strike:.2f}")
+            print(f"Distancia: {dist:+.2f} {direccion}")
+            print(f"Tipo: {tipo}")
+            print(f"Puntaje: {score:.1f}/300")
+            print(f"   (Factores: Volumen + Flujo + Cercanía + Max Pain ajustado + Gamma)")
         else:
             print("   — No se pudo determinar —")
         
         print(f"\n{'='*80}")
-        print(f"📊 INTERPRETACIÓN DE DATOS (NO ES PREDICCIÓN)")
+        print(f"💡 ESTRATEGIA RECOMENDADA")
         print(f"{'='*80}")
-
-        print(f"\n⚠️  DISCLAIMER IMPORTANTE:")
-        print(f"   Las opciones NO predicen dirección del precio.")
-        print(f"   Este análisis identifica:")
-        print(f"   • Niveles técnicos con alta actividad institucional")
-        print(f"   • Volatilidad esperada por el mercado")
-        print(f"   • Posicionamiento que puede generar soporte/resistencia")
-        print(f"   • Contexto de mercado, NO señales de trading\n")
-
+        
         if dias_restantes <= 2:
-            print(f"⏰ VENCIMIENTO INMEDIATO ({dias_restantes}d)")
-            print(f"   • Max Pain: ${max_pain:.2f} (distancia: {distancia:+.2f})")
-            print(f"   • Cerca del vencimiento, strikes con mucho OI pueden actuar como 'imanes'")
-            print(f"   • Razón: Delta hedging de market makers, NO manipulación")
-            print(f"   • Úsalo como CONTEXTO, no como señal de entrada\n")
-
+            print(f"⚠️  VENCIMIENTO INMEDIATO - Alta probabilidad de movimiento hacia Max Pain")
+            if distancia > 0:
+                print(f"   → Escenario base: Precio debería BAJAR de ${precio_actual:.2f} hacia ${max_pain:.2f}")
+                print(f"   → Considerar: Short en rebotes / Long puts / Evitar calls")
+            else:
+                print(f"   → Escenario base: Precio debería SUBIR de ${precio_actual:.2f} hacia ${max_pain:.2f}")
+                print(f"   → Considerar: Long en caídas / Long calls / Venta de puts")
+        
         if status_gamma == "SHORT GAMMA FUERTE":
-            print(f"📈 DEALERS EN SHORT GAMMA")
-            print(f"   • Net Gamma: {net_gamma:,.0f}")
-            print(f"   • Comportamiento: {comportamiento}")
-            print(f"   • Implicación: Movimientos de precio pueden amplificarse")
-            print(f"   • NO predice dirección, solo magnitud potencial\n")
+            print(f"\n⚠️  DEALERS EN SHORT GAMMA - Movimientos pueden ser EXPLOSIVOS")
+            print(f"   → Alta volatilidad esperada")
+            print(f"   → Los breakouts se amplificarán")
+            print(f"   → Usar stops más amplios")
         elif status_gamma == "LONG GAMMA FUERTE":
-            print(f"📉 DEALERS EN LONG GAMMA")
-            print(f"   • Net Gamma: {net_gamma:,.0f}")
-            print(f"   • Comportamiento: {comportamiento}")
-            print(f"   • Implicación: Movimientos de precio pueden contenerse")
-            print(f"   • Favorece estrategias de reversión a la media\n")
+            print(f"\n✅ DEALERS EN LONG GAMMA - Movimientos contenidos/estabilizados")
+            print(f"   → Reversiones rápidas probables")
+            print(f"   → Ideal para mean reversion")
+            print(f"   → Cuidado con perseguir breakouts")
         
         if not gamma_walls.empty:
             resistencias = gamma_walls[gamma_walls['strike'] > precio_actual].head(2)
             soportes = gamma_walls[gamma_walls['strike'] < precio_actual].head(2)
             
             if not resistencias.empty:
-                print(f"🔴 Resistencias potenciales (gamma exposure):")
+                print(f"\n🔴 Resistencias institucionales (gamma walls):")
                 for _, row in resistencias.iterrows():
-                    print(f"   • ${row['strike']:.2f} (+${row['distancia']:.2f})")
-                print(f"   ℹ️  MM pueden vender si precio se acerca (delta hedging)")
-                print(f"   ℹ️  NO garantiza reversión - úsalo como referencia técnica\n")
+                    print(f"   • ${row['strike']:.2f} (distancia: ${row['distancia']:.2f}) - MM venderán contra rallies")
             
             if not soportes.empty:
-                print(f"🟢 Soportes potenciales (gamma exposure):")
+                print(f"\n🟢 Soportes institucionales (gamma walls):")
                 for _, row in soportes.iterrows():
-                    print(f"   • ${row['strike']:.2f} (-${row['distancia']:.2f})")
-                print(f"   ℹ️  MM pueden comprar si precio se acerca (delta hedging)")
-                print(f"   ℹ️  NO garantiza rebote - úsalo como referencia técnica\n")
+                    print(f"   • ${row['strike']:.2f} (distancia: ${row['distancia']:.2f}) - MM comprarán en caídas")
         
-        print(f"{'='*80}")
+        print(f"\n{'='*80}")
         print("GENERANDO DASHBOARDS INTERACTIVOS...")
         print(f"{'='*80}")
         try:
             crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_strike, dias_restantes, ticker)
         except Exception as e:
-            print(f"   — Error al generar dashboards: {e} —")
+            print(f"   — Error al generar mapa: {e} —")
             import traceback
             traceback.print_exc()
 
         print(f"\n{'='*80}")
-        print("✅ ANÁLISIS COMPLETO - ÚSALO RESPONSABLEMENTE")
-        print(f"{'='*80}")
-        print(f"\n⚠️  RECORDATORIO FINAL:")
-        print(f"   • Este análisis identifica CONTEXTO de mercado, no señales")
-        print(f"   • Las opciones NO predicen dirección del precio")
-        print(f"   • Combina con análisis técnico/fundamental propio")
-        print(f"   • Gestiona riesgo apropiadamente")
-        print(f"   • Ninguna herramienta garantiza ganancias")
+        print("✅ Análisis completo. Usa estos datos para posicionarte con ventaja institucional.")
         print(f"{'='*80}\n")
         
     except KeyboardInterrupt:
@@ -1163,45 +926,13 @@ def main(ticker):
     except Exception as e:
         print(f"\n❌ ERROR INESPERADO: {e}")
         print(f"   Tipo de error: {type(e).__name__}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
     print("\n" + "="*80)
     print("   ANÁLISIS INSTITUCIONAL DE OPCIONES")
     print("   Con protección anti-rate-limit")
-    print("="*80)
-    
-    print("\n" + "⚠️ " * 20)
-    print("   DISCLAIMER IMPORTANTE - LEER ANTES DE USAR")
-    print("⚠️ " * 20)
-    print("""
-Este software es únicamente educativo y de análisis de mercado.
-
-LAS OPCIONES NO PREDICEN DIRECCIÓN DEL PRECIO.
-
-Este análisis identifica:
-✓ Niveles técnicos con alta actividad institucional
-✓ Volatilidad implícita y expectativas del mercado
-✓ Contexto de posicionamiento (NO señales de trading)
-
-NO sustituye:
-✗ Análisis técnico o fundamental propio
-✗ Gestión de riesgo profesional
-✗ Asesoría financiera personalizada
-
-El trading de opciones conlleva riesgo sustancial de pérdida.
-Ninguna herramienta garantiza ganancias.
-    """)
     print("="*80 + "\n")
-    
-    respuesta = input("¿Entiendes que esto NO es predicción de precio? (SI/NO): ").strip().upper()
-    if respuesta != "SI":
-        print("\n❌ Debes entender las limitaciones antes de usar esta herramienta.")
-        sys.exit(0)
-    
-    print("\n")
     
     ticker = input("Ticker: ").strip().upper()
     if not ticker:
