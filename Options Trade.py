@@ -7,59 +7,52 @@ import numpy as np
 import warnings
 import time
 import sys
-warnings.filterwarnings('ignore')
-# Añadir después de las otras importaciones
+import random
 from scipy.stats import norm
-import math
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import plotly.express as px
+
+# Desactivar advertencias innecesarias
+warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURACIÓN DE RATE LIMITING
+# CONFIGURACIÓN DE TIEMPOS ALEATORIOS (JITTER)
 # ============================================================================
-DELAY_ENTRE_REQUESTS = 2  # segundos entre llamadas a Yahoo Finance
-MAX_REINTENTOS = 3
-DELAY_REINTENTO = 5  # segundos de espera si falla
 
-def esperar_rate_limit(segundos=DELAY_ENTRE_REQUESTS):
-    """Pausa para evitar rate limiting"""
-    print(f"   ⏳ Esperando {segundos}s para evitar bloqueos...", end='\r')
-    time.sleep(segundos)
-    print(" " * 60, end='\r')  # Limpiar línea
-
-def reintentar_con_backoff(func, *args, max_intentos=MAX_REINTENTOS, **kwargs):
-    """Reintenta una función con backoff exponencial"""
-    for intento in range(max_intentos):
-        try:
-            resultado = func(*args, **kwargs)
-            return resultado
-        except Exception as e:
-            if "Rate" in str(e) or "429" in str(e):
-                if intento < max_intentos - 1:
-                    espera = DELAY_REINTENTO * (2 ** intento)
-                    print(f"\n⚠️  Rate limit detectado. Reintento {intento + 1}/{max_intentos} en {espera}s...")
-                    time.sleep(espera)
-                else:
-                    raise Exception(f"❌ Rate limit persistente después de {max_intentos} intentos. "
-                                    f"Espera 5-10 minutos y vuelve a intentar.")
-            else:
-                raise e
+def esperar_rate_limit(segundos_base=3):
+    """
+    Pausa con variación aleatoria para simular comportamiento humano.
+    Ahora que usamos curl_cffi, las pausas son menos críticas pero ayudan.
+    """
+    jitter = random.uniform(1.5, 4.5)
+    tiempo_total = segundos_base + jitter
+    print(f"   ⏳ Pausa de seguridad: {tiempo_total:.2f}s...", end='\r')
+    time.sleep(tiempo_total)
+    print(" " * 60, end='\r')
 
 # ============================================================================
-# FUNCIONES DE OBTENCIÓN DE DATOS (CON PROTECCIÓN)
+# FUNCIONES DE OBTENCIÓN DE DATOS (NUEVA LÓGICA CON CURL_CFFI)
 # ============================================================================
-def obtener_vencimiento_optimo(ticker):
-    """Obtiene el vencimiento más cercano con protección contra rate limit"""
+
+def obtener_vencimiento_optimo(ticker_str):
+    """
+    Obtiene el vencimiento más cercano. 
+    IMPORTANTE: No pasamos 'session'. yf usará curl_cffi automáticamente.
+    """
     try:
-        print(f"📡 Conectando con Yahoo Finance para {ticker}...")
-        activo = yf.Ticker(ticker)
+        print(f"📡 Conectando con Yahoo Finance para {ticker_str}...")
         
-        # Primera llamada: obtener expiraciones
-        esperar_rate_limit()
-        expiraciones = reintentar_con_backoff(lambda: activo.options)
+        # Inicializamos el Ticker sin sesión manual
+        activo = yf.Ticker(ticker_str)
+        
+        # Esperamos un poco para no saturar el primer contacto
+        esperar_rate_limit(2)
+        
+        # Obtenemos las fechas de expiración
+        expiraciones = activo.options
         
         if not expiraciones:
+            print(f"⚠️ No se encontraron opciones para {ticker_str}")
             return activo, None, None
         
         hoy = datetime.now().date()
@@ -77,38 +70,41 @@ def obtener_vencimiento_optimo(ticker):
         if not candidatos:
             return activo, None, None
         
+        # Ordenamos por cercanía (DTE)
         candidatos.sort(key=lambda x: x[1])
         return activo, candidatos[0][0], candidatos[0][1]
         
     except Exception as e:
-        if "Rate" in str(e) or "429" in str(e):
-            print(f"\n❌ ERROR: Yahoo Finance está bloqueando las peticiones.")
-            print(f"   Soluciones:")
-            print(f"   1. Espera 5-10 minutos antes de volver a intentar")
-            print(f"   2. Verifica tu conexión a internet")
-            print(f"   3. Si persiste, Yahoo puede tener restricciones temporales")
-            sys.exit(1)
-        else:
-            raise e
-
-def obtener_datos_opciones(activo, vencimiento):
-    """Obtiene cadena de opciones con protección"""
-    print(f"📊 Descargando datos de opciones para {vencimiento}...")
-    esperar_rate_limit()
-    
-    cadena = reintentar_con_backoff(lambda: activo.option_chain(vencimiento))
-    return cadena.calls.copy(), cadena.puts.copy()
+        print(f"\n❌ Error de conexión: {e}")
+        print("💡 Tip: Si persiste, intenta cambiar de red (usa los datos de tu móvil).")
+        sys.exit(1)
 
 def obtener_precio_actual(activo):
-    """Obtiene precio actual con protección"""
+    """
+    Obtiene el precio actual usando fast_info, 
+    que es el método más rápido y compatible con curl_cffi.
+    """
     print(f"💰 Obteniendo precio actual...")
-    esperar_rate_limit()
+    esperar_rate_limit(1)
+    try:
+        # Intentamos el método ultraligero
+        precio = activo.fast_info['lastPrice']
+        return precio
+    except:
+        # Fallback si fast_info falla
+        historia = activo.history(period="1d")
+        if historia.empty:
+            raise Exception("No se pudo obtener el precio del activo")
+        return historia['Close'].iloc[-1]
+
+def obtener_datos_opciones(activo, vencimiento):
+    """Obtiene cadena de opciones usando el motor interno de yf"""
+    print(f"📊 Descargando cadena de opciones para {vencimiento}...")
+    esperar_rate_limit(2)
     
-    historia = reintentar_con_backoff(lambda: activo.history(period="1d"))
-    if historia.empty:
-        raise Exception("No se pudo obtener el precio actual")
-    
-    return historia['Close'].iloc[-1]
+    # Esta llamada disparará el motor curl_cffi internamente
+    cadena = activo.option_chain(vencimiento)
+    return cadena.calls.copy(), cadena.puts.copy()
 
 # ============================================================================
 # FUNCIONES DE ANÁLISIS (SIN CAMBIOS)
