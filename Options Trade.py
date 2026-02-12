@@ -413,7 +413,7 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
         lambda r: calc_prob_itm(r['strike'], precio_actual, r['iv_avg'], dias_restantes), axis=1
     )
     
-    # Sentimiento
+    # Sentimiento basado en pc_ratio (volumen)
     def sent(ratio):
         if ratio > 1.5:
             return 'BEARISH 🐻'
@@ -423,6 +423,17 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
             return 'NEUTRAL ⚖️'
     
     gamma_df['sentimiento'] = gamma_df['pc_ratio'].apply(sent)
+    
+    # Sentimiento basado en PREMIUM (dólares reales) — para el panel 4
+    def sent_premium(row):
+        if row['premium_put'] > row['premium_call'] * 1.5:
+            return 'BEARISH 🐻'
+        elif row['premium_call'] > row['premium_put'] * 1.5:
+            return 'BULLISH 🐂'
+        else:
+            return 'NEUTRAL ⚖️'
+    
+    gamma_df['sentimiento_premium'] = gamma_df.apply(sent_premium, axis=1)
     
     # Filtrar strikes con actividad
     umbral = gamma_df['total_volume'].quantile(0.2)
@@ -438,7 +449,7 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
             '1️⃣ NET GAMMA PROFILE (Muros Institucionales)',
             '2️⃣ VOLUMEN vs OPEN INTEREST (Flujo vs Posiciones)',
             '3️⃣ VOL/OI RATIO (Detección de Aperturas)',
-            '4️⃣ SMART MONEY FLOW (Premium Pagado)'
+            '4️⃣ SMART MONEY FLOW (Premium $ Pagado | Verde=Calls dominan | Rojo=Puts dominan)'
         ),
         vertical_spacing=0.08,
         row_heights=[0.3, 0.25, 0.2, 0.25]
@@ -512,9 +523,9 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
     
     # --- PANEL 3: Vol/OI Ratio ---
     colors_ratio = []
-    for idx, row in gamma_df.iterrows():
-        if row['vol_oi_ratio'] > 2.0:
-            if row['volume_call'] > row['volume_put']:
+    for _, row_data in gamma_df.iterrows():
+        if row_data['vol_oi_ratio'] > 2.0:
+            if row_data['volume_call'] > row_data['volume_put']:
                 colors_ratio.append('#00FF00')  # Verde: Aperturas alcistas
             else:
                 colors_ratio.append('#FF0000')  # Rojo: Aperturas bajistas
@@ -526,7 +537,12 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
         y=gamma_df['vol_oi_ratio'],
         name='Vol/OI Ratio',
         marker=dict(color=colors_ratio, line=dict(color='black', width=0.5)),
-        hovertemplate='<b>Strike: $%{x:.2f}</b><br>Vol/OI: %{y:.2f}<br>%{text}<extra></extra>',
+        hovertemplate=(
+            '<b>Strike: $%{x:.2f}</b><br>'
+            'Vol/OI: %{y:.2f}<br>'
+            'Sentimiento (volumen): %{text}<br>'
+            '<extra></extra>'
+        ),
         text=gamma_df['sentimiento']
     ), row=3, col=1)
     
@@ -551,6 +567,31 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
         hovertemplate='<b>Strike: $%{x:.2f}</b><br>$ Puts: $%{y:,.0f}<br><extra></extra>'
     ), row=4, col=1)
     
+    # Línea de diferencia neta (calls - puts) para mostrar dominancia real
+    gamma_df['premium_net'] = gamma_df['premium_call'] - gamma_df['premium_put']
+    colors_premium_net = ['#00FF88' if x > 0 else '#FF4444' for x in gamma_df['premium_net']]
+    
+    fig1.add_trace(go.Scatter(
+        x=gamma_df['strike'],
+        y=gamma_df['premium_net'],
+        name='Net Premium (Calls - Puts)',
+        mode='lines+markers',
+        line=dict(color='white', width=2, dash='dot'),
+        marker=dict(
+            size=10,
+            color=colors_premium_net,
+            symbol=['triangle-up' if x > 0 else 'triangle-down' for x in gamma_df['premium_net']],
+            line=dict(color='white', width=1)
+        ),
+        hovertemplate=(
+            '<b>Strike: $%{x:.2f}</b><br>'
+            'Net Premium: $%{y:,.0f}<br>'
+            '%{text}<br>'
+            '<extra></extra>'
+        ),
+        text=gamma_df['sentimiento_premium']
+    ), row=4, col=1)
+    
     fig1.add_vline(x=precio_actual, line=dict(color='yellow', width=2, dash='dash'), row=4, col=1)
     
     if mejor_strike:
@@ -570,14 +611,14 @@ def crear_dashboard_interactivo(calls, puts, precio_actual, max_pain, mejor_stri
         showlegend=True,
         hovermode='x unified',
         template='plotly_dark',
-        barmode='overlay'
+        barmode='group'
     )
     
     fig1.update_xaxes(title_text="Strike Price ($)", row=4, col=1)
     fig1.update_yaxes(title_text="Net Gamma", row=1, col=1)
     fig1.update_yaxes(title_text="Contratos", row=2, col=1)
     fig1.update_yaxes(title_text="Ratio", row=3, col=1)
-    fig1.update_yaxes(title_text="Premium ($)", row=4, col=1)
+    fig1.update_yaxes(title_text="Premium $ (verde=Calls, rojo=Puts, línea=Neto)", row=4, col=1)
     
     # ========================================================================
     # GRÁFICO 2: PROBABILITY & RISK MAP (3 paneles)
