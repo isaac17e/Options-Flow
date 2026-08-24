@@ -708,9 +708,12 @@ def consenso_direccional_0dte(max_pain, precio, status_gamma, pc_df, smart_calls
             votos["BAJISTA"] += 1
             bullets.append(f"Smart money: {ap_puts} aperturas nuevas en puts")
 
-    total     = sum(votos.values()) or 1
-    direccion = max(votos, key=votos.get)
-    confianza = round((votos[direccion] / total) * 100)
+    total       = sum(votos.values()) or 1
+    max_votos   = max(votos.values())
+    ganadores   = [d for d, v in votos.items() if v == max_votos]
+    # Empate entre ALCISTA/BAJISTA (o los tres) → no hay consenso direccional real.
+    direccion   = ganadores[0] if len(ganadores) == 1 else "NEUTRAL"
+    confianza   = round((max_votos / total) * 100)
     return direccion, confianza, bullets
 
 
@@ -1202,6 +1205,7 @@ def servir_dashboard(filepath, port=8765):
             super().end_headers()
 
     def _run():
+        socketserver.TCPServer.allow_reuse_address = True
         with socketserver.TCPServer(("", port), SilentHandler) as httpd:
             httpd.serve_forever()
 
@@ -1243,92 +1247,103 @@ def main(ticker, refresh_seconds=60):
             print(f"🔄 CICLO #{ciclo} — {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
             print(f"{'#'*80}")
 
-            print("📡 Conectando con Polygon.io…")
-            S = obtener_precio(ticker)
-            if not S:
+            try:
+                print("📡 Conectando con Polygon.io…")
+                S = obtener_precio(ticker)
+                if not S:
+                    print(f"   ⏳ Reintentando en {refresh_seconds}s…")
+                    time.sleep(refresh_seconds)
+                    continue
+
+                exp, dias = seleccionar_vencimiento_0dte(ticker)
+                if not exp:
+                    print(f"   ⏳ Reintentando en {refresh_seconds}s…")
+                    time.sleep(refresh_seconds)
+                    continue
+
+                print(f"\n{'─'*60}")
+                print(f"🔍 Analizando vencimiento 0DTE/más próximo: {exp} ({dias}d)")
+
+                calls, puts = obtener_cadena_0dte(ticker, exp, S, dias)
+                if calls is None:
+                    print(f"   ⛔ Sin cadena disponible para {exp}")
+                    print(f"   ⏳ Reintentando en {refresh_seconds}s…")
+                    time.sleep(refresh_seconds)
+                    continue
+
+                merged, uso_oi, modo_label = _preparar_merged_0dte(calls, puts, S)
+                if merged is None:
+                    print(f"   ⛔ Sin datos suficientes en la ventana ±3-5% del spot para {exp}")
+                    print(f"   ⏳ Reintentando en {refresh_seconds}s…")
+                    time.sleep(refresh_seconds)
+                    continue
+
+                # Zero Gamma Level y muros se calculan SOBRE LA MISMA VENTANA que
+                # se grafica (no sobre toda la cadena) — así el panel de Net GEX
+                # comparte el mismo rango de strikes que Volumen y Premium, y se
+                # evita "ruido" de strikes muy OTM con IV inferida poco confiable.
+                gex_ventana = (merged[["strike", "net_gex_local"]]
+                               .rename(columns={"net_gex_local": "net_gex"})
+                               .sort_values("strike").reset_index(drop=True))
+
+                max_pain               = calcular_max_pain(calls, puts, S=S)
+                zero_gamma             = calcular_zero_gamma_level(gex_ventana)
+                call_wall, put_wall    = identificar_muros_gex(gex_ventana)
+                status_g, net_g, comp_g = posicionamiento_dealers_real(calls, puts)
+                pc_df                  = ratio_pc_enriquecido(calls, puts)
+                sm_calls, sm_puts      = detectar_smart_money(calls, puts)
+                direccion, confianza, bullets = consenso_direccional_0dte(
+                    max_pain, S, status_g, pc_df, sm_calls, sm_puts, zero_gamma, call_wall, put_wall
+                )
+
+                dist = S - max_pain
+                print(f"\n  Max Pain 0DTE: ${max_pain:.2f}  (distancia: {dist:+.2f})")
+                print(f"  Posicionamiento dealers: {status_g}")
+                print(f"  Net GEX real: {net_g:,.0f}")
+                print(f"  Zero Gamma Level: {'$'+format(zero_gamma, ',.2f') if zero_gamma is not None else 'sin cruce en rango'}")
+                print(f"  Muro Calls (resistencia): {'$'+format(call_wall, ',.0f') if call_wall is not None else 'n/d'}")
+                print(f"  Muro Puts (soporte): {'$'+format(put_wall, ',.0f') if put_wall is not None else 'n/d'}")
+
+                emoji = "🟢" if direccion == "ALCISTA" else ("🔴" if direccion == "BAJISTA" else "⚖️")
+                print(f"  {emoji} CONSENSO 0DTE: {direccion}  |  Confianza: {confianza}%")
+
+                data = {
+                    "exp": exp, "dias": dias, "calls": calls, "puts": puts, "S": S,
+                    "max_pain": max_pain,
+                    "merged": merged, "uso_oi": uso_oi, "modo_label": modo_label,
+                    "zero_gamma": zero_gamma, "call_wall": call_wall, "put_wall": put_wall,
+                    "status_gamma": status_g, "net_gex": net_g,
+                    "pc_df": pc_df, "smart_calls": sm_calls, "smart_puts": sm_puts,
+                    "direccion": direccion, "confianza": confianza, "bullets": bullets
+                }
+
+                print(f"\n{'='*80}")
+                print("🎨 REGENERANDO DASHBOARD 0DTE…")
+                print(f"{'='*80}")
+
+                filepath = crear_dashboard_0dte(data, ticker, output_dir=output_dir,
+                                                 refresh_seconds=refresh_seconds)
+
+                if filepath and not server_iniciado:
+                    servir_dashboard(filepath, port=8765)
+                    server_iniciado = True
+                    print("   La página se recargará sola cada ciclo — no hace falta reabrirla.")
+
+                elapsed = time.time() - inicio_ciclo
+                espera = max(refresh_seconds - elapsed, 1)
+                print(f"\n✅ Ciclo #{ciclo} completo en {elapsed:.1f}s — próxima actualización en {espera:.0f}s.")
+                print("   Presiona Ctrl+C para detener.")
+                time.sleep(espera)
+
+            except Exception as e:
+                # Un error inesperado en un ciclo (respuesta corrupta, fallo de
+                # red puntual, etc.) no debe tumbar todo el monitor continuo:
+                # se registra y se reintenta en el siguiente ciclo.
+                print(f"\n⚠️  Error inesperado en el ciclo #{ciclo}: {e}")
+                import traceback
+                traceback.print_exc()
                 print(f"   ⏳ Reintentando en {refresh_seconds}s…")
                 time.sleep(refresh_seconds)
-                continue
-
-            exp, dias = seleccionar_vencimiento_0dte(ticker)
-            if not exp:
-                print(f"   ⏳ Reintentando en {refresh_seconds}s…")
-                time.sleep(refresh_seconds)
-                continue
-
-            print(f"\n{'─'*60}")
-            print(f"🔍 Analizando vencimiento 0DTE/más próximo: {exp} ({dias}d)")
-
-            calls, puts = obtener_cadena_0dte(ticker, exp, S, dias)
-            if calls is None:
-                print(f"   ⛔ Sin cadena disponible para {exp}")
-                print(f"   ⏳ Reintentando en {refresh_seconds}s…")
-                time.sleep(refresh_seconds)
-                continue
-
-            merged, uso_oi, modo_label = _preparar_merged_0dte(calls, puts, S)
-            if merged is None:
-                print(f"   ⛔ Sin datos suficientes en la ventana ±3-5% del spot para {exp}")
-                print(f"   ⏳ Reintentando en {refresh_seconds}s…")
-                time.sleep(refresh_seconds)
-                continue
-
-            # Zero Gamma Level y muros se calculan SOBRE LA MISMA VENTANA que
-            # se grafica (no sobre toda la cadena) — así el panel de Net GEX
-            # comparte el mismo rango de strikes que Volumen y Premium, y se
-            # evita "ruido" de strikes muy OTM con IV inferida poco confiable.
-            gex_ventana = (merged[["strike", "net_gex_local"]]
-                           .rename(columns={"net_gex_local": "net_gex"})
-                           .sort_values("strike").reset_index(drop=True))
-
-            max_pain               = calcular_max_pain(calls, puts, S=S)
-            zero_gamma             = calcular_zero_gamma_level(gex_ventana)
-            call_wall, put_wall    = identificar_muros_gex(gex_ventana)
-            status_g, net_g, comp_g = posicionamiento_dealers_real(calls, puts)
-            pc_df                  = ratio_pc_enriquecido(calls, puts)
-            sm_calls, sm_puts      = detectar_smart_money(calls, puts)
-            direccion, confianza, bullets = consenso_direccional_0dte(
-                max_pain, S, status_g, pc_df, sm_calls, sm_puts, zero_gamma, call_wall, put_wall
-            )
-
-            dist = S - max_pain
-            print(f"\n  Max Pain 0DTE: ${max_pain:.2f}  (distancia: {dist:+.2f})")
-            print(f"  Posicionamiento dealers: {status_g}")
-            print(f"  Net GEX real: {net_g:,.0f}")
-            print(f"  Zero Gamma Level: {'$'+format(zero_gamma, ',.2f') if zero_gamma is not None else 'sin cruce en rango'}")
-            print(f"  Muro Calls (resistencia): {'$'+format(call_wall, ',.0f') if call_wall is not None else 'n/d'}")
-            print(f"  Muro Puts (soporte): {'$'+format(put_wall, ',.0f') if put_wall is not None else 'n/d'}")
-
-            emoji = "🟢" if direccion == "ALCISTA" else ("🔴" if direccion == "BAJISTA" else "⚖️")
-            print(f"  {emoji} CONSENSO 0DTE: {direccion}  |  Confianza: {confianza}%")
-
-            data = {
-                "exp": exp, "dias": dias, "calls": calls, "puts": puts, "S": S,
-                "max_pain": max_pain,
-                "merged": merged, "uso_oi": uso_oi, "modo_label": modo_label,
-                "zero_gamma": zero_gamma, "call_wall": call_wall, "put_wall": put_wall,
-                "status_gamma": status_g, "net_gex": net_g,
-                "pc_df": pc_df, "smart_calls": sm_calls, "smart_puts": sm_puts,
-                "direccion": direccion, "confianza": confianza, "bullets": bullets
-            }
-
-            print(f"\n{'='*80}")
-            print("🎨 REGENERANDO DASHBOARD 0DTE…")
-            print(f"{'='*80}")
-
-            filepath = crear_dashboard_0dte(data, ticker, output_dir=output_dir,
-                                             refresh_seconds=refresh_seconds)
-
-            if filepath and not server_iniciado:
-                servir_dashboard(filepath, port=8765)
-                server_iniciado = True
-                print("   La página se recargará sola cada ciclo — no hace falta reabrirla.")
-
-            elapsed = time.time() - inicio_ciclo
-            espera = max(refresh_seconds - elapsed, 1)
-            print(f"\n✅ Ciclo #{ciclo} completo en {elapsed:.1f}s — próxima actualización en {espera:.0f}s.")
-            print("   Presiona Ctrl+C para detener.")
-            time.sleep(espera)
 
     except KeyboardInterrupt:
         print("\n\n🛑 Detenido por el usuario. Servidor cerrado.")
