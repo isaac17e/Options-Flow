@@ -1,0 +1,17 @@
+# --- Conexión a datos ---
+requests>=2.31.0
+websockets>=12.0
+python-dotenv>=1.0.0
+
+# --- Cómputo numérico y datos ---
+pandas>=2.2.0
+numpy>=1.26.0
+scipy>=1.12.0
+
+# --- Bloque 5 (dashboard, se instala más adelante, lo dejamos listado ya) ---
+dash>=2.16.0
+plotly>=5.20.0
+streamlit>=1.32.0
+
+# --- Utilidades ---
+python-dateutil>=2.9.0
