@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .DS_Store
 *_0DTE_dashboard.html
+*_0DTE_data.json
 .env

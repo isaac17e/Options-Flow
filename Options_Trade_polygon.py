@@ -9,6 +9,7 @@ import warnings
 import time
 import sys
 import os
+import json
 import threading
 import http.server
 import socketserver
@@ -586,6 +587,22 @@ def identificar_muros_gex(gex_df):
     return call_wall, put_wall
 
 
+def identificar_picos_gamma_bruta(merged, top_n=3):
+    """
+    Strikes con mayor gamma bruta (|GEX calls| + |GEX puts|): los puntos de
+    mayor actividad TOTAL de cobertura de dealers, sin importar el signo
+    neto. A diferencia del Net GEX —que puede esconder actividad cuando
+    calls y puts se cancelan entre sí—, esto señala zonas de "pinning"/imán
+    y mayor probabilidad de whipsaw intradía. Ver discusión en el README
+    del panel: gross gamma = dónde hay fricción, net gamma = hacia dónde
+    empuja esa fricción.
+    """
+    if merged is None or merged.empty or "gross_gex" not in merged.columns:
+        return []
+    top = merged[merged["gross_gex"] > 0].nlargest(top_n, "gross_gex")
+    return list(zip(top["strike"].tolist(), top["gross_gex"].tolist()))
+
+
 def posicionamiento_dealers_real(calls, puts):
     if "gex" not in calls.columns:
         return "SIN DATOS", 0, "No calculado"
@@ -764,6 +781,7 @@ def _preparar_merged_0dte(calls, puts, S):
     merged["vol_total"]     = merged["volume_c"] + merged["volume_p"]
     merged["oi_total"]      = merged["openInterest_c"] + merged["openInterest_p"]
     merged["net_gex_local"] = merged["gex_c"] + merged["gex_p"]
+    merged["gross_gex"]     = merged["gex_c"].abs() + merged["gex_p"].abs()
 
     iv_mask = (merged["impliedVolatility_c"] > 0) | (merged["impliedVolatility_p"] > 0)
     merged_activo = merged[iv_mask].copy()
@@ -895,15 +913,20 @@ def _tabla_gex_html(merged, S, max_pain, zero_gamma, call_wall, put_wall):
 # ─────────────────────────────────────────────
 
 def _build_dashboard_fig(merged, ticker, exp, dias, S, max_pain, zero_gamma, call_wall, put_wall,
-                          status, direccion, confianza, modo_label):
+                          status, direccion, confianza, modo_label, picos_gamma_bruta=None):
     """
-    Figura consolidada de 3 paneles para el vencimiento 0DTE/más próximo:
+    Figura consolidada de 4 paneles para el vencimiento 0DTE/más próximo:
       ① Net GEX por strike, con Gamma Flip y muros de Calls/Puts.
-      ② Volumen Call vs Put por strike.
-      ③ Premium $ neto (Calls - Puts) por strike.
+      ② Gamma bruta (|GEX calls| + |GEX puts|) — dónde hay más actividad
+         TOTAL de cobertura de dealers, con o sin cancelarse en el neto.
+         Señala zonas de "pinning"/imán y mayor probabilidad de whipsaw.
+      ③ Volumen Call vs Put por strike.
+      ④ Premium $ neto (Calls - Puts) por strike.
     """
+    picos_gamma_bruta = picos_gamma_bruta or []
     strike_l        = merged["strike"].tolist()
     net_gex_l       = merged["net_gex_local"].tolist()
+    gross_gex_l     = merged["gross_gex"].tolist()
     vol_c_l         = merged["volume_c"].tolist()
     vol_p_l         = merged["volume_p"].tolist()
     premium_c_l     = merged["premium_c"].tolist()
@@ -914,15 +937,20 @@ def _build_dashboard_fig(merged, ticker, exp, dias, S, max_pain, zero_gamma, cal
     color_prem  = merged["color_prem"].tolist()
     symbol_prem = ["triangle-up" if x > 0 else "triangle-down" for x in net_prem_l]
 
+    strikes_pico    = {s for s, _ in picos_gamma_bruta}
+    color_gross     = ["#f59e0b" if s in strikes_pico else "#475569" for s in strike_l]
+    line_gross      = ["#fbbf24" if s in strikes_pico else "rgba(0,0,0,0.3)" for s in strike_l]
+
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=4, cols=1,
         subplot_titles=(
             "① NET GEX (Gamma Exposure BSM) — Gamma Flip y Muros Calls/Puts",
-            f"② VOLUMEN Call vs Put — {modo_label}",
-            "③ PREMIUM NETO $ (Calls − Puts) — dónde va el dinero intradía"
+            "② GAMMA BRUTA (|Calls| + |Puts|) — picos de concentración / pinning",
+            f"③ VOLUMEN Call vs Put — {modo_label}",
+            "④ PREMIUM NETO $ (Calls − Puts) — dónde va el dinero intradía"
         ),
-        vertical_spacing=0.09,
-        row_heights=[0.4, 0.28, 0.32]
+        vertical_spacing=0.07,
+        row_heights=[0.30, 0.20, 0.22, 0.28]
     )
 
     # ① Net GEX + muros + zero gamma
@@ -938,29 +966,40 @@ def _build_dashboard_fig(merged, ticker, exp, dias, S, max_pain, zero_gamma, cal
         fig.add_vline(x=put_wall, line=dict(color="#ef4444", width=2, dash="dashdot"),
                       annotation_text=f"Muro Puts ${put_wall:.0f}", annotation_position="bottom left",
                       row=1, col=1)
-    # ② Volumen Call vs Put
-    fig.add_trace(go.Bar(x=strike_l, y=vol_c_l, name="Vol Calls", marker_color="#4ade80",
-        hovertemplate="<b>$%{x:.0f}</b><br>Vol Calls: %{y:,.0f}<extra></extra>"), row=2, col=1)
-    fig.add_trace(go.Bar(x=strike_l, y=vol_p_l, name="Vol Puts", marker_color="#f87171",
-        hovertemplate="<b>$%{x:.0f}</b><br>Vol Puts: %{y:,.0f}<extra></extra>"), row=2, col=1)
 
-    # ③ Premium neto
+    # ② Gamma bruta — picos de concentración resaltados
+    fig.add_trace(go.Bar(x=strike_l, y=gross_gex_l, name="Gamma bruta",
+        marker=dict(color=color_gross, line=dict(color=line_gross, width=1.2)),
+        hovertemplate="<b>$%{x:.0f}</b><br>Gamma bruta: %{y:,.0f}<extra></extra>"), row=2, col=1)
+    for strike_pico, valor_pico in picos_gamma_bruta:
+        fig.add_annotation(x=strike_pico, y=valor_pico, row=2, col=1,
+            text=f"🔥 ${strike_pico:.0f}", showarrow=True, arrowhead=2, arrowcolor="#f59e0b",
+            ax=0, ay=-22, font=dict(size=10, color="#fbbf24"),
+            bgcolor="rgba(20,20,30,0.85)", bordercolor="#f59e0b", borderwidth=1)
+
+    # ③ Volumen Call vs Put
+    fig.add_trace(go.Bar(x=strike_l, y=vol_c_l, name="Vol Calls", marker_color="#4ade80",
+        hovertemplate="<b>$%{x:.0f}</b><br>Vol Calls: %{y:,.0f}<extra></extra>"), row=3, col=1)
+    fig.add_trace(go.Bar(x=strike_l, y=vol_p_l, name="Vol Puts", marker_color="#f87171",
+        hovertemplate="<b>$%{x:.0f}</b><br>Vol Puts: %{y:,.0f}<extra></extra>"), row=3, col=1)
+
+    # ④ Premium neto
     fig.add_trace(go.Bar(x=strike_l, y=premium_c_l, name="Premium Calls", marker_color="#16a34a",
-        hovertemplate="<b>$%{x:.0f}</b><br>Premium calls: $%{y:,.0f}<extra></extra>"), row=3, col=1)
+        hovertemplate="<b>$%{x:.0f}</b><br>Premium calls: $%{y:,.0f}<extra></extra>"), row=4, col=1)
     fig.add_trace(go.Bar(x=strike_l, y=premium_p_neg_l, name="Premium Puts", marker_color="#dc2626",
-        hovertemplate="<b>$%{x:.0f}</b><br>Premium puts: $%{y:,.0f}<extra></extra>"), row=3, col=1)
+        hovertemplate="<b>$%{x:.0f}</b><br>Premium puts: $%{y:,.0f}<extra></extra>"), row=4, col=1)
     fig.add_trace(go.Scatter(x=strike_l, y=net_prem_l, name="Neto (C-P)", mode="lines+markers",
         line=dict(color="white", width=2, dash="dot"),
         marker=dict(size=8, color=color_prem, symbol=symbol_prem),
-        hovertemplate="<b>$%{x:.0f}</b><br>Neto: $%{y:,.0f}<extra></extra>"), row=3, col=1)
+        hovertemplate="<b>$%{x:.0f}</b><br>Neto: $%{y:,.0f}<extra></extra>"), row=4, col=1)
 
-    for row_n in [1, 2, 3]:
+    for row_n in [1, 2, 3, 4]:
         fig.add_vline(x=S, line=dict(color="#fbbf24", width=2, dash="dash"),
                       annotation_text=f"Spot ${S:.2f}" if row_n == 1 else "",
                       annotation_position="top right" if row_n != 1 else "bottom right",
                       row=row_n, col=1)
         fig.add_vline(x=max_pain, line=dict(color="#fb923c", width=1.5, dash="dot"),
-                      annotation_text=f"Max Pain ${max_pain:.0f}" if row_n == 2 else "",
+                      annotation_text=f"Max Pain ${max_pain:.0f}" if row_n == 3 else "",
                       annotation_position="bottom right", row=row_n, col=1)
         if zero_gamma is not None:
             fig.add_vline(x=zero_gamma, line=dict(color="#a78bfa", width=2.5, dash="dashdot"),
@@ -981,25 +1020,27 @@ def _build_dashboard_fig(merged, ticker, exp, dias, S, max_pain, zero_gamma, cal
     fig.update_layout(
         title=dict(text=f"<b>{ticker.upper()} | {exp} ({dias}d) — 0DTE / Intradía</b>",
                    x=0.5, xanchor="center", font=dict(size=15)),
-        height=1050, template="plotly_dark", barmode="overlay",
+        height=1300, template="plotly_dark", barmode="overlay",
         showlegend=True, hovermode="x unified",
-        legend=dict(orientation="h", y=-0.04, x=0.5, xanchor="center"),
-        margin=dict(t=60, b=50, l=55, r=55)
+        legend=dict(orientation="h", y=-0.03, x=0.5, xanchor="center"),
+        margin=dict(t=60, b=50, l=55, r=55),
+        uirevision="0dte-dashboard"
     )
 
-    # Rango de eje X compartido y explícito en los 3 paneles: evita que una
+    # Rango de eje X compartido y explícito en los 4 paneles: evita que una
     # anotación (spot, max pain, zero gamma, muros) fuera del rango de
     # strikes graficado estire un panel más que los otros.
     x_min, x_max = min(strike_l), max(strike_l)
     margen_x = (x_max - x_min) * 0.03 if x_max > x_min else 1
     x_range = [x_min - margen_x, x_max + margen_x]
-    for row_n in [1, 2, 3]:
+    for row_n in [1, 2, 3, 4]:
         fig.update_xaxes(range=x_range, row=row_n, col=1)
 
     fig.update_yaxes(title_text="GEX ($)", row=1, col=1)
-    fig.update_yaxes(title_text="Volumen", row=2, col=1)
-    fig.update_yaxes(title_text="Premium $", row=3, col=1)
-    fig.update_xaxes(title_text="Strike ($)", row=3, col=1)
+    fig.update_yaxes(title_text="Gamma bruta ($)", row=2, col=1)
+    fig.update_yaxes(title_text="Volumen", row=3, col=1)
+    fig.update_yaxes(title_text="Premium $", row=4, col=1)
+    fig.update_xaxes(title_text="Strike ($)", row=4, col=1)
     return fig
 
 
@@ -1026,6 +1067,7 @@ def crear_dashboard_0dte(data, ticker, output_dir=None, refresh_seconds=None):
     bullets            = data["bullets"]
     merged             = data["merged"]
     modo_label         = data["modo_label"]
+    picos_gamma_bruta  = data.get("picos_gamma_bruta") or []
 
     if merged is None or merged.empty:
         print("❌ Sin datos suficientes para construir el dashboard.")
@@ -1033,7 +1075,8 @@ def crear_dashboard_0dte(data, ticker, output_dir=None, refresh_seconds=None):
 
     tabla_gex = _tabla_gex_html(merged, S, max_pain, zero_gamma, call_wall, put_wall)
     fig       = _build_dashboard_fig(merged, ticker, exp, dias, S, max_pain, zero_gamma,
-                                      call_wall, put_wall, status, direccion, confianza, modo_label)
+                                      call_wall, put_wall, status, direccion, confianza, modo_label,
+                                      picos_gamma_bruta=picos_gamma_bruta)
     fig_json  = fig.to_json()
 
     ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -1041,9 +1084,34 @@ def crear_dashboard_0dte(data, ticker, output_dir=None, refresh_seconds=None):
     if refresh_seconds:
         refresh_ms = int(refresh_seconds * 1000)
         auto_refresh_js = f"""
-setTimeout(function() {{ location.reload(); }}, {refresh_ms});
+var __data_url    = "{ticker.upper()}_0DTE_data.json";
+var __refresh_ms  = {refresh_ms};
 var __seg_restantes = {refresh_seconds};
 var __contador_el = document.getElementById('countdown');
+
+function __actualizar_dom(d) {{
+  document.getElementById('header-price').textContent = d.header_price;
+  document.getElementById('header-sub').textContent   = d.header_sub;
+  document.getElementById('metrics-grid').innerHTML   = d.metrics_html;
+  document.getElementById('bullets-section').innerHTML = d.bullets_html;
+  document.getElementById('gex-table-container').innerHTML = d.tabla_html;
+  Plotly.react('plot-main', d.fig.data, d.fig.layout, {{responsive:true}});
+}}
+
+async function __refrescar() {{
+  try {{
+    var resp = await fetch(__data_url + '?v=' + Date.now(), {{cache: 'no-store'}});
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var d = await resp.json();
+    __actualizar_dom(d);
+  }} catch (e) {{
+    console.warn('No se pudo refrescar datos en vivo:', e);
+  }} finally {{
+    __seg_restantes = {refresh_seconds};
+  }}
+}}
+
+setInterval(__refrescar, __refresh_ms);
 setInterval(function() {{
   __seg_restantes -= 1;
   if (__seg_restantes < 0) __seg_restantes = 0;
@@ -1067,6 +1135,8 @@ setInterval(function() {{
     dir_color = "#22c55e" if direccion == "ALCISTA" else ("#ef4444" if direccion == "BAJISTA" else "#94a3b8")
     emoji_dir = "🟢" if direccion == "ALCISTA" else ("🔴" if direccion == "BAJISTA" else "⚖️")
     etiqueta_venc = "0DTE (vence hoy)" if dias == 0 else f"vencimiento más próximo ({dias}d)"
+    header_price = f"${S:.2f}"
+    header_sub   = f"Análisis institucional · {ts} · Vencimiento {exp} ({etiqueta_venc}) · Gamma BSM real"
 
     if zero_gamma is not None:
         gamma_flip_val   = f"${zero_gamma:.0f}"
@@ -1081,10 +1151,19 @@ setInterval(function() {{
         gamma_flip_color = "#94a3b8"
         gamma_flip_sub   = "Sin cruce de signo en el rango graficado"
 
+    if picos_gamma_bruta:
+        pico_strike, pico_valor = picos_gamma_bruta[0]
+        gamma_pico_val = f"${pico_strike:.0f}"
+        gamma_pico_sub = f"Gamma bruta: {pico_valor:,.0f} · zona de pinning/whipsaw"
+    else:
+        gamma_pico_val = "N/D"
+        gamma_pico_sub = "Sin concentración destacable en el rango"
+
     metric_cards = (
         card("Precio Spot", f"${S:.2f}", etiqueta_venc, "#f0f6fc")
         + card("Max Pain 0DTE", f"${max_pain:.0f}", f"Distancia al spot: {S - max_pain:+.2f}", "#fb923c")
         + card("⚡ Gamma Flip", gamma_flip_val, gamma_flip_sub, gamma_flip_color, accent=True)
+        + card("🔥 Pico Gamma Bruta", gamma_pico_val, gamma_pico_sub, "#f59e0b", accent=True)
         + card("Posicionamiento Dealers", status, "Gamma neto de la cadena 0DTE", "#58a6ff")
         + card(f"{emoji_dir} Consenso Direccional 0DTE", f"{direccion}  ·  {confianza}%",
                "Nivel de confianza del consenso", dir_color)
@@ -1149,10 +1228,10 @@ setInterval(function() {{
 <div class="header">
   <div>
     <div class="header-title">{ticker.upper()} — 0DTE / Intradía Dashboard</div>
-    <div class="header-sub">Análisis institucional · {ts} · Vencimiento {exp} ({etiqueta_venc}) · Gamma BSM real</div>
+    <div class="header-sub" id="header-sub">{header_sub}</div>
   </div>
   <div style="text-align:right">
-    <div class="header-price">${S:.2f}</div>
+    <div class="header-price" id="header-price">{header_price}</div>
     <div class="header-change">Precio spot (último disponible)</div>
   </div>
 </div>
@@ -1165,7 +1244,7 @@ setInterval(function() {{
 
 <div class="decision-panel">
   <div class="panel-title">Panel de decisión — 0DTE</div>
-  <div class="metrics-grid">
+  <div class="metrics-grid" id="metrics-grid">
     {metric_cards}
   </div>
   <div class="gamma-flip-note">
@@ -1175,7 +1254,7 @@ setInterval(function() {{
     (posicionamiento estándar de dealers), igual que en el resto del Net GEX de este dashboard.
   </div>
   <div class="panel-title" style="margin-top:16px">Señales detectadas</div>
-  <div class="bullets-section">{bullets_html}</div>
+  <div class="bullets-section" id="bullets-section">{bullets_html}</div>
 </div>
 
 <div class="legend-row">
@@ -1188,7 +1267,7 @@ setInterval(function() {{
 
 <div class="main-content">
   <div class="section-title">Net GEX y Muros por Strike (±3–5% del spot)</div>
-  {tabla_gex}
+  <div id="gex-table-container">{tabla_gex}</div>
   <div id="plot-main"></div>
 </div>
 
@@ -1215,6 +1294,22 @@ Plotly.newPlot("plot-main", figDataMain.data, figDataMain.layout, {{responsive:t
 
     if size_kb < 10:
         print("   ⚠️  Archivo muy pequeño — verifica que los datos se obtuvieron correctamente.")
+
+    # Payload JSON con las piezas dinámicas: el navegador ya abierto lo
+    # consulta por fetch() cada `refresh_seconds` y actualiza el DOM y el
+    # gráfico (Plotly.react) in-place, sin recargar la página completa.
+    payload = {
+        "ts": ts,
+        "header_price": header_price,
+        "header_sub": header_sub,
+        "metrics_html": metric_cards,
+        "bullets_html": bullets_html,
+        "tabla_html": tabla_gex,
+        "fig": json.loads(fig_json),
+    }
+    fname_json = os.path.join(output_dir, f"{ticker.upper()}_0DTE_data.json")
+    with open(fname_json, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
 
     return fname
 
@@ -1328,6 +1423,7 @@ def main(ticker, refresh_seconds=60):
                 max_pain               = calcular_max_pain(calls, puts, S=S)
                 zero_gamma             = calcular_zero_gamma_level(gex_ventana, S=S)
                 call_wall, put_wall    = identificar_muros_gex(gex_ventana)
+                picos_gamma_bruta      = identificar_picos_gamma_bruta(merged, top_n=3)
                 status_g, net_g, comp_g = posicionamiento_dealers_real(calls, puts)
                 pc_df                  = ratio_pc_enriquecido(calls, puts)
                 sm_calls, sm_puts      = detectar_smart_money(calls, puts)
@@ -1342,6 +1438,9 @@ def main(ticker, refresh_seconds=60):
                 print(f"  Gamma Flip: {'$'+format(zero_gamma, ',.2f') if zero_gamma is not None else 'sin cruce en rango'}")
                 print(f"  Muro Calls (resistencia): {'$'+format(call_wall, ',.0f') if call_wall is not None else 'n/d'}")
                 print(f"  Muro Puts (soporte): {'$'+format(put_wall, ',.0f') if put_wall is not None else 'n/d'}")
+                if picos_gamma_bruta:
+                    picos_txt = ", ".join(f"${s:.0f} ({v:,.0f})" for s, v in picos_gamma_bruta)
+                    print(f"  🔥 Picos de gamma bruta: {picos_txt}")
 
                 emoji = "🟢" if direccion == "ALCISTA" else ("🔴" if direccion == "BAJISTA" else "⚖️")
                 print(f"  {emoji} CONSENSO 0DTE: {direccion}  |  Confianza: {confianza}%")
@@ -1351,6 +1450,7 @@ def main(ticker, refresh_seconds=60):
                     "max_pain": max_pain,
                     "merged": merged, "uso_oi": uso_oi, "modo_label": modo_label,
                     "zero_gamma": zero_gamma, "call_wall": call_wall, "put_wall": put_wall,
+                    "picos_gamma_bruta": picos_gamma_bruta,
                     "status_gamma": status_g, "net_gex": net_g,
                     "pc_df": pc_df, "smart_calls": sm_calls, "smart_puts": sm_puts,
                     "direccion": direccion, "confianza": confianza, "bullets": bullets
@@ -1366,7 +1466,7 @@ def main(ticker, refresh_seconds=60):
                 if filepath and not server_iniciado:
                     servir_dashboard(filepath, port=8765)
                     server_iniciado = True
-                    print("   La página se recargará sola cada ciclo — no hace falta reabrirla.")
+                    print("   La página se actualiza sola en vivo cada ciclo (sin recargar) — no hace falta reabrirla.")
 
                 elapsed = time.time() - inicio_ciclo
                 espera = max(refresh_seconds - elapsed, 1)
