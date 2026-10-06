@@ -266,8 +266,10 @@ def decide(levels: dict, live: dict, state: dict, p: Params = Params()) -> dict:
 # ─────────────────────────── gestión ───────────────────────────
 def manage(position: dict, levels: dict, live: dict, p: Params = Params()) -> dict:
     """
-    position: {"side","plan","entry","stop","tp","opened": datetime}
+    position: {"side","plan","entry","stop","tp","opened": datetime, "regime_at_entry" (opcional)}
     Cada ciclo: EXIT (TP / stop / 14:45 / tiempo máximo / cambio de régimen), MOVE_TP o HOLD.
+    Con regime_at_entry (trades del escáner) se sale si el régimen deja de ser el de la entrada;
+    sin él se aplican las reglas de los planes A/B (requieren LONG) y C (requiere SHORT).
     El stop nunca se ensancha (manage() nunca devuelve otro stop).
     """
     now, base = live["now"], float(live.get("base", 0.0))
@@ -282,6 +284,8 @@ def manage(position: dict, levels: dict, live: dict, p: Params = Params()) -> di
     if now - position["opened"] >= timedelta(minutes=p.hold_minutes):
         return dict(action="EXIT", reason=f"tiempo máximo {p.hold_minutes} min", price=mark)
     reg = regime(levels)
+    if position.get("regime_at_entry") and reg != position["regime_at_entry"]:
+        return dict(action="EXIT", reason=f"el régimen cambió ({position['regime_at_entry']} → {reg})", price=mark)
     if position["plan"] in ("A", "B") and reg != "LONG":
         return dict(action="EXIT", reason="el régimen dejó de ser LONG gamma", price=mark)
     if position["plan"] == "C" and reg == "LONG":

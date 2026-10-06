@@ -104,3 +104,15 @@ Todos los umbrales escalan con el precio o son adimensionales, así que valen pa
   - Holding máximo de 75 min y entradas solo de 08:45 a 10:00 COT.
 - Todas las distancias son `max(pct·S, k·σ_h)`, con σ_h la desviación esperada en la ventana de holding a partir de la IV ATM. Por eso funcionan igual en un índice de 7.800 y en una acción de 100 USD (ver `tests/test_decision.py`).
 - `decision.position_size(...)`: 5 % del balance como margen al apalancamiento de la cuenta, redondeado hacia abajo al incremento y con el mínimo del broker.
+- `decision.manage` acepta `regime_at_entry` en la posición: si viene (trades del escáner), se sale cuando el régimen deja de ser el de la entrada.
+
+## Escáner multi-activo (`scanner.py`)
+Lógica genérica del modo escáner; no coloca órdenes (el orquestador vive fuera del repo).
+- `key_strike(levels, spot, now)`: entre los strikes atractivos, el de mayor gamma bruta × P(toque) en el tiempo que queda.
+- `evaluate(ticker, levels, SessionRange(open, high, low), live, now)`: con el máximo/mínimo del CFD desde las 08:30 COT y la base (CFD = strike + base):
+  - **no tocado** → `CANDIDATE` hacia el strike (TP en el strike, stop detrás del nivel atractivo previo), o `WAIT` si no pasa P(toque) ≥ 0,30 y R:R ≥ 1,0;
+  - **tocado** (lado de llegada = el de la apertura) y Net GEX local > 0 con rechazo → `WALL`: reversión hacia el siguiente nivel (TP con `decision.choose_tp`), stop más allá del muro;
+  - **tocado** y Net GEX local < 0, cruzado ≥ `break_margin` → `ACCELERATOR`: continuación al siguiente strike atractivo, stop de vuelta al otro lado;
+  - muro cruzado ≥ `break_margin` (aunque vuelva), acelerador rechazado, o siguiente movimiento sin filtros → `EXPIRED` para el día; precio aún en el nivel → `WAIT`.
+- `select(evaluaciones)`: el candidato con mayor P(toque) × min(R:R, 3).
+- Tests sintéticos de todos los caminos en `tests/test_scanner.py`.
