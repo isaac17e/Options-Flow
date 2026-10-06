@@ -356,7 +356,7 @@ def obtener_precio(ticker, contratos=None):
         print(f"   ⚠️  Capital.com falló: {e}")
 
     if contratos:
-        val = _precio_via_paridad_put_call(contratos)
+        val = _tk.parity_spot(contratos) or _precio_via_paridad_put_call(contratos)
         if val and val > 0:
             fuente = "paridad put-call (estimado sobre la cadena de Polygon)"
             hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

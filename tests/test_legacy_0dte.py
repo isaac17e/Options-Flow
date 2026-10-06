@@ -250,7 +250,29 @@ def test_spot_paridad_reutiliza_la_cadena_sin_llamadas(capital, monkeypatch):
         _contrato("put", 675.0, 100, iv=0.2, close=6.0),
     ]
     S, fuente, _ = legacy.obtener_precio("SPY", contratos)
-    assert S == pytest.approx(670.5)
+    assert S == pytest.approx(670.25)        # mediana de los dos strikes (670.5 y 670.0)
+    assert "paridad" in fuente
+
+
+def test_spot_paridad_separa_raices_spx_y_spxw(capital, monkeypatch):
+    monkeypatch.delenv("CAPITAL_API_KEY")    # Capital.com falla por credenciales
+
+    def op(raiz, tipo, strike, precio):
+        return {"details": {"ticker": f"O:{raiz}261016{tipo[0].upper()}{int(strike * 1000):08d}",
+                            "contract_type": tipo, "strike_price": strike},
+                "day": {"volume": 10}, "last_trade": {"price": precio}}
+
+    contratos = [
+        op("SPXW", "call", 7770.0, 15.0), op("SPXW", "put", 7770.0, 8.0),     # 7777
+        op("SPXW", "call", 7775.0, 12.0), op("SPXW", "put", 7775.0, 10.0),    # 7777
+        op("SPXW", "call", 7780.0, 9.5), op("SPXW", "put", 7780.0, 12.5),     # 7777
+        op("SPX", "call", 7775.0, 20.0), op("SPX", "put", 7775.0, 19.5),      # 7775.5 (mensual, mismo strike)
+    ]
+    # sin separar raíces, el par más "ATM" mezcla el mensual: 7775.5
+    assert legacy._precio_via_paridad_put_call(contratos) == pytest.approx(7775.5)
+
+    S, fuente, _ = legacy.obtener_precio("SPX", contratos)
+    assert S == pytest.approx(7777.0)
     assert "paridad" in fuente
 
 
