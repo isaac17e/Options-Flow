@@ -39,6 +39,21 @@ BACKOFF_MAX_SECONDS = 30.0
 RETRY_AFTER_MAX_SECONDS = 120.0  # tope de cordura para un Retry-After del servidor
 
 
+# ticker -> (ticker para contratos de referencia, ticker para el snapshot).
+# SPX: la referencia con "SPX" trae también SPXW, pero el snapshot con "SPX"
+# llega sin IV ni griegas; hay que pedirlo como "I:SPX".
+POLYGON_TICKERS = {
+    "SPX": ("SPX", "I:SPX"),
+    "SPY": ("SPY", "SPY"),
+}
+
+
+def polygon_tickers(ticker: str) -> tuple:
+    """(ticker de referencia, ticker de snapshot); lo no listado usa el mismo para ambos."""
+    ticker = ticker.upper()
+    return POLYGON_TICKERS.get(ticker, (ticker, ticker))
+
+
 class PolygonClientError(Exception):
     """Error de comunicación o de datos al hablar con Polygon.io"""
     pass
@@ -107,11 +122,25 @@ class PolygonClient:
     # ------------------------------------------------------------------
     # Subyacente (Capital.com)
     # ------------------------------------------------------------------
-    def get_underlying_snapshot(self, ticker: str) -> UnderlyingSnapshot:
-        """Spot en tiempo real desde Capital.com (ver capital_client.py)."""
+    def _capital(self) -> CapitalClient:
         if self._spot_client is None:
             self._spot_client = CapitalClient(self._settings)
-        return self._spot_client.get_underlying_snapshot(ticker)
+        return self._spot_client
+
+    def get_underlying_snapshot(self, ticker: str, default_basis: Optional[float] = None) -> UnderlyingSnapshot:
+        """
+        Spot en tiempo real desde Capital.com (ver capital_client.py). Para
+        SPX, `default_basis` es la base de respaldo (por defecto SETTINGS.spx_basis).
+        """
+        if default_basis is None:
+            return self._capital().get_underlying_snapshot(ticker)
+        return self._capital().get_underlying_snapshot(ticker, default_basis=default_basis)
+
+    def refine_underlying_basis(
+        self, underlying: UnderlyingSnapshot, contracts: list
+    ) -> UnderlyingSnapshot:
+        """Base SPX - US500 por paridad con la cadena del vencimiento más próximo (ver capital_client.py)."""
+        return self._capital().apply_parity_basis(underlying, contracts)
 
     # ------------------------------------------------------------------
     # Listado de vencimientos disponibles (endpoint de referencia, liviano)
@@ -128,7 +157,7 @@ class PolygonClient:
         """
         path = "/v3/reference/options/contracts"
         params = {
-            "underlying_ticker": ticker,
+            "underlying_ticker": polygon_tickers(ticker)[0],
             "expiration_date.gte": date.today().isoformat(),
             "expired": "false",
             "sort": "expiration_date",
@@ -168,7 +197,7 @@ class PolygonClient:
         Parameters
         ----------
         underlying_ticker : str
-            Ej. "SPY", "NVDA".
+            Ej. "SPY", "NVDA", "SPX" (se consulta como "I:SPX", ver POLYGON_TICKERS).
         expiration_date : date, opcional
             Si se especifica, filtra solo esa fecha de vencimiento
             (reduce drásticamente el volumen de datos).
@@ -191,7 +220,7 @@ class PolygonClient:
 
         contracts: list[OptionContract] = []
         skipped = 0
-        path = f"/v3/snapshot/options/{underlying_ticker}"
+        path = f"/v3/snapshot/options/{polygon_tickers(underlying_ticker)[1]}"
         data = self._get(path, params=params)
 
         while True:
@@ -265,6 +294,7 @@ class PolygonClient:
                 vega=greeks.get("vega"),
                 theta=greeks.get("theta"),
                 snapshot_time=datetime.now(),
+                day_close=day.get("close"),
             )
         except (KeyError, ValueError, TypeError) as exc:
             # Un contrato mal formado no debe tumbar toda la cadena.

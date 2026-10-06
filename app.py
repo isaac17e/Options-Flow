@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from config import SETTINGS
 from src.data.polygon_client import PolygonClient
 from src.data.models import OptionChainSnapshot
+from src.data.spot_basis import BASIS_TICKERS
 from src.models.svi_inputs import build_svi_inputs
 from src.models.svi import calibrate_svi
 from src.models.pdf_extraction import extract_risk_neutral_pdf
@@ -26,7 +27,26 @@ def get_client():
 client = get_client()
 
 with st.sidebar:
-    ticker = st.text_input("Ticker", value="SPY").upper()
+    underlying_choice = st.selectbox("Subyacente", ["SPY", "SPX", "Otro"], index=0)
+    if underlying_choice == "Otro":
+        ticker = st.text_input("Ticker", value="QQQ").strip().upper()
+    else:
+        ticker = underlying_choice
+    uses_basis = ticker in BASIS_TICKERS
+    spx_basis = SETTINGS.spx_basis
+    auto_basis = False
+    if uses_basis:
+        spx_basis = st.number_input(
+            "Base SPX − US500 (puntos)",
+            value=float(SETTINGS.spx_basis), step=0.1, format="%.2f",
+            help="Spot SPX = mid de US500 + base. Es el valor de respaldo cuando no se "
+                 "puede calcular la base por paridad put-call.",
+        )
+        auto_basis = st.checkbox(
+            "Calcular la base por paridad put-call", value=True,
+            help="Mediana del forward K + C − P de los strikes ATM del vencimiento más próximo, "
+                 f"menos el US500 de hace {SETTINGS.options_delay_minutes} min (retraso de las opciones).",
+        )
     expiration_index_pdf = st.slider("Vencimiento para PDF (índice)", 0, 30, 10)
     n_expirations_dealer = st.slider("Vencimientos para GEX/VEX/CEX", 2, 10, 6)
     dividend_yield_pct = st.number_input(
@@ -41,8 +61,13 @@ with st.sidebar:
 
 
 @st.cache_data(ttl=60)
-def load_underlying(_client, ticker):
-    return _client.get_underlying_snapshot(ticker)
+def load_underlying(_client, ticker, default_basis):
+    return _client.get_underlying_snapshot(ticker, default_basis=default_basis)
+
+
+@st.cache_data(ttl=60)
+def load_parity_underlying(_client, ticker, expiration, default_basis, _underlying, _contracts):
+    return _client.refine_underlying_basis(_underlying, _contracts)
 
 
 @st.cache_data(ttl=60)
@@ -59,22 +84,18 @@ def load_chain_for_expiration(_client, ticker, expiration, _underlying):
 def load_dealer_chain(_client, ticker, expirations_tuple, _underlying):
     all_contracts = []
     for exp in expirations_tuple:
-        chain = _client.get_option_chain_snapshot(ticker, expiration_date=exp, underlying=_underlying)
+        # Reutiliza la cadena ya en caché de cada vencimiento (la del vencimiento
+        # más próximo ya se pidió para la base SPX).
+        chain = load_chain_for_expiration(_client, ticker, exp, _underlying)
         all_contracts.extend(chain.filter_by_expiration(exp).contracts)
     return OptionChainSnapshot(underlying=_underlying, contracts=all_contracts)
 
 
 try:
-    underlying = load_underlying(client, ticker)
+    underlying = load_underlying(client, ticker, spx_basis)
 except Exception as e:
     st.error(f"Error obteniendo spot de Capital.com: {e}")
     st.stop()
-
-st.metric("Spot", f"{underlying.spot_price:.2f}")
-st.caption(
-    f"Spot = punto medio bid/offer de Capital.com, actualizado: "
-    f"{underlying.snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}"
-)
 
 # Solo se piden los vencimientos que se van a usar (PDF y dealers).
 expirations = load_expirations(client, ticker, max(expiration_index_pdf + 1, n_expirations_dealer))
@@ -82,6 +103,28 @@ expirations = load_expirations(client, ticker, max(expiration_index_pdf + 1, n_e
 if not expirations:
     st.error(f"No se encontraron vencimientos de opciones para {ticker}. Verifica el ticker.")
     st.stop()
+
+if uses_basis and auto_basis:
+    # La base se calcula con la cadena del vencimiento más próximo del propio ciclo.
+    try:
+        near_chain = load_chain_for_expiration(client, ticker, expirations[0], underlying)
+        underlying = load_parity_underlying(
+            client, ticker, expirations[0], spx_basis, underlying,
+            near_chain.filter_by_expiration(expirations[0]).contracts,
+        )
+    except Exception as e:
+        st.warning(f"No se pudo calcular la base por paridad, se usa la del parámetro: {e}")
+
+st.metric("Spot", f"{underlying.spot_price:.2f}")
+st.caption(
+    f"Spot = {underlying.source}, actualizado: "
+    f"{underlying.snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}"
+)
+if uses_basis:
+    st.caption(
+        f"US500 (mid) {underlying.raw_price:.2f} + base {underlying.basis:+.2f} "
+        f"→ SPX {underlying.spot_price:.2f} · base: {underlying.basis_source}"
+    )
 
 col1, col2 = st.columns(2)
 

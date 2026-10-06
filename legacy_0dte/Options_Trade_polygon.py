@@ -1,10 +1,13 @@
+import argparse
 import atexit
 import random
+import re
+import statistics
 import requests
 import pandas as pd
 import numpy as np
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
@@ -23,6 +26,23 @@ import webbrowser
 
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "").strip()
 POLYGON_BASE_URL = "https://api.polygon.io"
+
+# ticker → (ticker para contratos de referencia, ticker para el snapshot).
+# SPX: la referencia con "SPX" incluye SPXW, pero el snapshot con "SPX" llega
+# sin IV ni griegas; hay que pedirlo como "I:SPX".
+POLYGON_TICKERS = {
+    "SPX": ("SPX", "I:SPX"),
+    "SPY": ("SPY", "SPY"),
+}
+
+# Subyacente por defecto si no se indica otro (CLI --ticker, env OPTIONS_TICKER o prompt).
+TICKER_POR_DEFECTO = "SPY"
+
+
+def tickers_polygon(ticker):
+    """(ticker de referencia, ticker de snapshot); lo no listado usa el mismo para ambos."""
+    t = ticker.upper()
+    return POLYGON_TICKERS.get(t, (t, t))
 
 
 # Reintentos ante 429 (rate limit) y 5xx transitorios.
@@ -185,18 +205,161 @@ class CapitalSession:
 
 _capital = CapitalSession()
 
+# ticker → (epic de Capital.com, tipo de instrumento esperado o None).
+# En Capital.com el epic "SPX" es Spirax Sarco (una acción), no el índice:
+# SPX se toma del CFD US500 (INDICES) más una base. Lo no listado usa su
+# propio símbolo como epic, sin verificar el tipo.
+CAPITAL_EPICS = {
+    "SPX": ("US500", "INDICES"),
+    "SPY": ("SPY", None),
+}
+
+# Tickers cuyo spot es mid(epic) + base (SPX = US500 + base).
+TICKERS_CON_BASE = {"SPX"}
+
+# Base SPX − US500 en puntos (respaldo si no se puede calcular por paridad).
+# Medido el 2026-10-05: US500 ≈ SPX − 1, o sea base ≈ +1. Se cambia con la
+# variable SPX_BASIS o con --spx-basis.
+def _leer_base_spx():
+    try:
+        return float(os.environ.get("SPX_BASIS", "").strip() or 1.0)
+    except ValueError:
+        print("   ⚠️  SPX_BASIS no es un número — se usa 1.0")
+        return 1.0
+
+SPX_BASIS_DEFAULT = _leer_base_spx()
+
+# Las opciones de Polygon van ~15 min por detrás: la base se calcula contra el
+# US500 de hace estos minutos. Una barra a más de MAX_BRECHA_BARRA_MIN del
+# instante buscado (mercado cerrado) se descarta.
+RETRASO_OPCIONES_MIN = 15
+MAX_BRECHA_BARRA_MIN = 5
+PARIDAD_N_STRIKES = 7
+PARIDAD_MIN_STRIKES = 3
+BASE_MAX_FRACCION = 0.005   # una base mayor al 0,5% del precio se descarta como dato malo
+
+
+def epic_capital(ticker):
+    """(epic, tipo esperado o None) para el ticker."""
+    t = ticker.upper()
+    return CAPITAL_EPICS.get(t, (t, None))
+
+
+def _verificar_tipo_instrumento(epic, esperado, data):
+    if esperado is None:
+        return
+    real = (data.get("instrument") or {}).get("type")
+    if real is None:
+        print(f"   ⚠️  Capital.com no informó el tipo de instrumento de {epic} (se esperaba {esperado})")
+    elif real != esperado:
+        raise RuntimeError(f"El epic {epic} de Capital.com es de tipo {real}, se esperaba {esperado}: "
+                           "no es el instrumento correcto para usarlo como spot")
+
 
 def _precio_via_capital(ticker):
     """
-    Spot = (bid + offer) / 2 de GET /markets/{epic}, con el ticker como
-    epic (SPY → SPY). Devuelve (precio, hora, estado del mercado).
+    Spot = (bid + offer) / 2 de GET /markets/{epic}, con el epic de
+    CAPITAL_EPICS (SPY → SPY, SPX → US500) y verificando el tipo de
+    instrumento. Devuelve (precio, hora, estado del mercado); para SPX el
+    precio es el del US500, sin base.
     """
-    snap = _capital.get(f"/markets/{ticker.upper()}").get("snapshot") or {}
+    epic, esperado = epic_capital(ticker)
+    data = _capital.get(f"/markets/{epic}")
+    _verificar_tipo_instrumento(epic, esperado, data)
+    snap = data.get("snapshot") or {}
     bid, offer = snap.get("bid"), snap.get("offer")
     if bid is None or offer is None:
-        raise RuntimeError(f"Capital.com no devolvió bid/offer para {ticker.upper()}")
+        raise RuntimeError(f"Capital.com no devolvió bid/offer para {epic}")
     hora = (snap.get("updateTime") or "").split(".")[0].replace("T", " ")
     return (float(bid) + float(offer)) / 2, hora, snap.get("marketStatus")
+
+
+def _mid_capital_en(epic, instante_utc):
+    """
+    Mid (bid+ask)/2 del cierre de la barra de 1 minuto más cercana a
+    `instante_utc` (datetime con tz UTC), vía GET /prices/{epic}. None si no
+    hay barra a menos de MAX_BRECHA_BARRA_MIN.
+    """
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    ventana = timedelta(minutes=MAX_BRECHA_BARRA_MIN + 1)
+    data = _capital.get(f"/prices/{epic}?resolution=MINUTE&max=30"
+                        f"&from={(instante_utc - ventana).strftime(fmt)}"
+                        f"&to={(instante_utc + ventana).strftime(fmt)}")
+    mejor, mejor_brecha = None, timedelta(minutes=MAX_BRECHA_BARRA_MIN)
+    for barra in data.get("prices") or []:
+        try:
+            # snapshotTimeUTC es el inicio de la barra; su cierre es un minuto después.
+            inicio = datetime.fromisoformat(barra["snapshotTimeUTC"]).replace(tzinfo=timezone.utc)
+            cierre = barra["closePrice"]
+            mid = (float(cierre["bid"]) + float(cierre["ask"])) / 2
+        except (KeyError, TypeError, ValueError):
+            continue
+        brecha = abs(inicio + timedelta(minutes=1) - instante_utc)
+        if brecha <= mejor_brecha:
+            mejor, mejor_brecha = mid, brecha
+    return mejor
+
+
+def forward_paridad(contratos, n_strikes=PARIDAD_N_STRIKES, min_strikes=PARIDAD_MIN_STRIKES):
+    """
+    Mediana de K + C − P sobre los `n_strikes` strikes donde call y put cuestan
+    lo más parecido (los ATM), con la cadena cruda de UN vencimiento. Solo
+    cuentan contratos con precio (último trade, mid bid/ask o cierre del día)
+    y volumen > 0. SPX y SPXW (mismo strike) no se mezclan. None si hay menos
+    de `min_strikes` strikes utilizables.
+    """
+    lados = {}
+    for c in contratos:
+        det = c.get("details", {}) or {}
+        tipo, strike = det.get("contract_type"), det.get("strike_price")
+        if tipo not in ("call", "put") or strike is None:
+            continue
+        day = c.get("day", {}) or {}
+        if not (day.get("volume") or 0) > 0:
+            continue
+        trade = (c.get("last_trade", {}) or {}).get("price")
+        quote = c.get("last_quote", {}) or {}
+        precio = trade or ((quote["bid"] + quote["ask"]) / 2 if quote.get("bid") and quote.get("ask") else None) \
+            or day.get("close")
+        if not precio or precio <= 0:
+            continue
+        m = re.match(r"^O:([A-Z]+)\d{6}[CP]", det.get("ticker") or "")
+        lados.setdefault((m.group(1) if m else "", float(strike)), {})[tipo] = float(precio)
+
+    filas = [(k, l["call"], l["put"]) for (_, k), l in lados.items() if "call" in l and "put" in l]
+    if len(filas) < min_strikes:
+        return None
+    filas.sort(key=lambda f: abs(f[1] - f[2]))
+    return float(statistics.median(k + c - p for k, c, p in filas[:n_strikes]))
+
+
+def calcular_base_spx(contratos, epic, ahora=None, base_defecto=None):
+    """
+    Base SPX − US500 del ciclo: mediana del forward por paridad de la cadena
+    menos el mid de US500 de hace RETRASO_OPCIONES_MIN minutos (compensa el
+    retraso de Polygon). Si no se puede calcular (sin strikes ATM, sin barra,
+    base absurda, error de red) usa `base_defecto` (SPX_BASIS_DEFAULT).
+    Devuelve (base, descripción de la fuente).
+    """
+    base_defecto = SPX_BASIS_DEFAULT if base_defecto is None else base_defecto
+
+    def respaldo(motivo):
+        return base_defecto, f"parámetro {base_defecto:+.2f} (respaldo: {motivo})"
+
+    forward = forward_paridad(contratos) if contratos else None
+    if forward is None:
+        return respaldo("sin strikes ATM con call y put en la cadena")
+    objetivo = (ahora or datetime.now(timezone.utc)) - timedelta(minutes=RETRASO_OPCIONES_MIN)
+    try:
+        mid_pasado = _mid_capital_en(epic, objetivo)
+    except Exception as e:
+        return respaldo(f"sin precio histórico de {epic}: {e}")
+    if mid_pasado is None:
+        return respaldo(f"sin barra de {epic} cerca de t-{RETRASO_OPCIONES_MIN} min")
+    base = forward - mid_pasado
+    if abs(base) > BASE_MAX_FRACCION * mid_pasado:
+        return respaldo(f"base absurda: forward {forward:.2f} vs {epic} {mid_pasado:.2f}")
+    return base, f"paridad put-call (forward {forward:.2f}) − {epic} de t-{RETRASO_OPCIONES_MIN} min ({mid_pasado:.2f})"
 
 
 # ─────────────────────────────────────────────
@@ -246,7 +409,15 @@ def obtener_precio(ticker, contratos=None):
     try:
         val, hora, estado = _precio_via_capital(ticker)
         if val > 0:
-            fuente = "Capital.com (mid bid/offer)"
+            epic, _ = epic_capital(ticker)
+            if ticker.upper() in TICKERS_CON_BASE:
+                # Spot del índice = mid del CFD + base (por paridad en este ciclo, o el parámetro).
+                base, fuente_base = calcular_base_spx(contratos, epic)
+                fuente = (f"Capital.com {epic} (mid {val:.2f}) + base {base:+.2f} "
+                          f"[{fuente_base}]")
+                val += base
+            else:
+                fuente = "Capital.com (mid bid/offer)"
             if estado and estado != "TRADEABLE":
                 fuente += f" · mercado {estado}"
             hora = hora or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -431,7 +602,7 @@ def seleccionar_vencimiento_0dte(ticker, silencioso=False):
         data = _polygon_get(
             "/v3/reference/options/contracts",
             params={
-                "underlying_ticker": ticker.upper(),
+                "underlying_ticker": tickers_polygon(ticker)[0],
                 "expired": "false",
                 "expiration_date.gte": hoy.isoformat(),
                 "sort": "expiration_date",
@@ -518,7 +689,7 @@ def descargar_cadena_0dte(ticker, vencimiento):
     0DTE/más próximo. Devuelve la lista cruda de contratos.
     """
     return _polygon_get_all_pages(
-        f"/v3/snapshot/options/{ticker.upper()}",
+        f"/v3/snapshot/options/{tickers_polygon(ticker)[1]}",
         params={"expiration_date": vencimiento, "limit": 250},
     )
 
@@ -718,15 +889,79 @@ def identificar_picos_gamma_bruta(merged, top_n=3):
     return list(zip(top["strike"].tolist(), top["gross_gex"].tolist()))
 
 
-def posicionamiento_dealers_real(calls, puts):
+# ─────────────────────────────────────────────
+#  UMBRALES ESCALADOS (SPY sin cambios, SPX comparable)
+# ─────────────────────────────────────────────
+#
+# Los umbrales eran constantes en escala SPY (≈ $670). Con SPX (≈ $7.800,
+# contratos ≈ 10× más grandes en dólares) quedaban siempre disparados. Ahora
+# se expresan relativos al spot o al movimiento esperado y, en el spot de
+# referencia, reproducen exactamente los valores anteriores.
+
+SPOT_REFERENCIA = 670.0            # SPY en el momento en que se fijaron los umbrales antiguos
+
+# Max Pain: distancia mínima spot-max pain para votar. Antes: $2 fijos.
+# Ahora: MAX_PAIN_FRACCION_STRADDLE × straddle ATM (≈ $2,1 en SPY a 1DTE),
+# acotado a [0,1%, 0,6%] del spot por si el último precio de las opciones
+# ATM es viejo; sin straddle utilizable: 0,3% del spot ($2,0 en SPY@670).
+MAX_PAIN_FRACCION_STRADDLE = 0.5
+MAX_PAIN_MIN_FRAC_SPOT = 0.001
+MAX_PAIN_MAX_FRAC_SPOT = 0.006
+MAX_PAIN_FRAC_SPOT_RESPALDO = 2.0 / SPOT_REFERENCIA
+
+# Posicionamiento de dealers: umbral de Net GEX "fuerte". Antes: ±5e8 sobre el
+# gex del script (OI·gamma·100·S, delta-shares-por-unidad-relativa). Ahora se
+# mide en dólares por 1% de movimiento (gex · S · 0,01), la unidad comparable
+# entre subyacentes: 5e8 · 670 · 0,01 = 3,35e9 $ por 1%.
+GEX_FUERTE_USD_POR_1PCT = 5e8 * SPOT_REFERENCIA * 0.01
+
+# Smart money: precio mínimo de la opción. Antes: $0,10 fijo (SPY). Ahora
+# 0,10 · S / SPOT_REFERENCIA (≈ $1,16 en SPX@7.800).
+SMART_MONEY_PRECIO_MIN_SPY = 0.10
+
+
+def straddle_atm(calls, puts, S):
+    """
+    Precio del straddle del strike más cercano al spot con precio de call y
+    put (lastPrice > 0). None si no hay ninguno.
+    """
+    if calls is None or puts is None or calls.empty or puts.empty:
+        return None
+    m = pd.merge(calls[["strike", "lastPrice"]], puts[["strike", "lastPrice"]],
+                 on="strike", suffixes=("_c", "_p")).dropna()
+    m = m[(m["lastPrice_c"] > 0) & (m["lastPrice_p"] > 0)]
+    if m.empty:
+        return None
+    fila = m.loc[(m["strike"] - S).abs().idxmin()]
+    return float(fila["lastPrice_c"] + fila["lastPrice_p"])
+
+
+def calcular_umbral_max_pain(S, calls=None, puts=None):
+    """Distancia spot-max pain (en $) a partir de la cual el max pain vota. Ver MAX_PAIN_*."""
+    straddle = straddle_atm(calls, puts, S)
+    if straddle is None:
+        return S * MAX_PAIN_FRAC_SPOT_RESPALDO
+    umbral = MAX_PAIN_FRACCION_STRADDLE * straddle
+    return min(max(umbral, S * MAX_PAIN_MIN_FRAC_SPOT), S * MAX_PAIN_MAX_FRAC_SPOT)
+
+
+def umbral_gex_fuerte(S=None):
+    """Umbral de Net GEX fuerte en unidades del gex del script. Sin spot: el valor SPY original (5e8)."""
+    if not S:
+        return GEX_FUERTE_USD_POR_1PCT / (SPOT_REFERENCIA * 0.01)
+    return GEX_FUERTE_USD_POR_1PCT / (S * 0.01)
+
+
+def posicionamiento_dealers_real(calls, puts, S=None):
     if "gex" not in calls.columns:
         return "SIN DATOS", 0, "No calculado"
     net = calls["gex"].sum() + puts["gex"].sum()
-    if net > 5e8:
+    fuerte = umbral_gex_fuerte(S)
+    if net > fuerte:
         status, comp = "LONG GAMMA FUERTE", "Reversiones rápidas, precio contenido"
     elif net > 0:
         status, comp = "LONG GAMMA DÉBIL", "Estabilización leve, puede rotar"
-    elif net > -5e8:
+    elif net > -fuerte:
         status, comp = "SHORT GAMMA DÉBIL", "Amplificación moderada de movimientos"
     else:
         status, comp = "SHORT GAMMA FUERTE", "Volatilidad explosiva, breakouts amplificados"
@@ -768,7 +1003,9 @@ def ratio_pc_enriquecido(calls, puts):
     ].head(10)
 
 
-def detectar_smart_money(calls, puts):
+def detectar_smart_money(calls, puts, S=None):
+    precio_min = SMART_MONEY_PRECIO_MIN_SPY * (S / SPOT_REFERENCIA if S else 1.0)
+
     def filtrar(df):
         d = df.copy()
         d["iv_pct"] = d["impliedVolatility"].rank(pct=True)
@@ -783,7 +1020,7 @@ def detectar_smart_money(calls, puts):
             d["activity_pct"] = d["volume"].rank(pct=True)
             d["premium_paid"] = d["volume"] * d["lastPrice"] * 100
 
-        smart = d[(d["activity_pct"] > 0.6) & (d["iv_pct"] > 0.4) & (d["lastPrice"] > 0.10)].copy()
+        smart = d[(d["activity_pct"] > 0.6) & (d["iv_pct"] > 0.4) & (d["lastPrice"] > precio_min)].copy()
         col_act = "openInterest" if uso_oi else "volume"
         smart = smart.rename(columns={col_act: "volume"})
         cols_norm = ["strike", "volume", "impliedVolatility", "premium_paid", "tipo_flujo", "señal_direccional"]
@@ -793,25 +1030,30 @@ def detectar_smart_money(calls, puts):
 
 
 def consenso_direccional_0dte(max_pain, precio, status_gamma, pc_df, smart_calls, smart_puts,
-                               zero_gamma, call_wall, put_wall):
+                               zero_gamma, call_wall, put_wall, umbral_max_pain=None):
     """
     Consenso direccional intradía. Pesa Max Pain, régimen de gamma de
     dealers, posición del spot frente al Gamma Flip y los muros de
     Calls/Puts, PC ratio y actividad de smart money (apertura nueva).
+
+    umbral_max_pain: distancia spot-max pain (en $) que activa el voto del
+    max pain (ver calcular_umbral_max_pain). Sin valor: 0,3% del spot.
     """
     votos   = {"ALCISTA": 0, "BAJISTA": 0, "NEUTRAL": 0}
     bullets = []
 
+    if umbral_max_pain is None:
+        umbral_max_pain = precio * MAX_PAIN_FRAC_SPOT_RESPALDO
     dist = precio - max_pain
-    if dist > 2:
+    if dist > umbral_max_pain:
         votos["BAJISTA"] += 2
         bullets.append(f"Max Pain 0DTE en ${max_pain:.0f} → presión bajista intradía")
-    elif dist < -2:
+    elif dist < -umbral_max_pain:
         votos["ALCISTA"] += 2
         bullets.append(f"Max Pain 0DTE en ${max_pain:.0f} → presión alcista intradía")
     else:
         votos["NEUTRAL"] += 1
-        bullets.append(f"Precio cerca del Max Pain 0DTE ${max_pain:.0f} → pin neutro")
+        bullets.append(f"Precio cerca del Max Pain 0DTE ${max_pain:.0f} (±{umbral_max_pain:.2f}) → pin neutro")
 
     if "LONG" in status_gamma:
         votos["NEUTRAL"] += 1
@@ -1351,7 +1593,7 @@ setInterval(function() {{
 </div>
 
 <div class="status-banner">
-  ℹ️ Spot: <b>Capital.com</b> (punto medio bid/offer; si falla, paridad put-call estimada sobre la cadena).
+  ℹ️ Spot: <b>Capital.com</b> (punto medio bid/offer; SPX = US500 + base; si falla, paridad put-call estimada sobre la cadena).
   Opciones: <b>último snapshot de Polygon.io</b> (el retraso depende del plan; sin last trade/quote se usa el cierre del día del contrato).
   Para 0DTE el <b>volumen del día</b> es la métrica reina — el OI de la mañana proviene del cierre anterior.
   &nbsp;·&nbsp; 🔄 Próxima actualización en: <b>{countdown_html}</b>
@@ -1547,17 +1789,19 @@ def main(ticker, refresh_seconds=60):
                 zero_gamma             = calcular_zero_gamma_level(gex_ventana, S=S)
                 call_wall, put_wall    = identificar_muros_gex(gex_ventana)
                 picos_gamma_bruta      = identificar_picos_gamma_bruta(merged, top_n=3)
-                status_g, net_g, _     = posicionamiento_dealers_real(calls, puts)
+                status_g, net_g, _     = posicionamiento_dealers_real(calls, puts, S=S)
                 pc_df                  = ratio_pc_enriquecido(calls, puts)
-                sm_calls, sm_puts      = detectar_smart_money(calls, puts)
+                sm_calls, sm_puts      = detectar_smart_money(calls, puts, S=S)
+                umbral_mp              = calcular_umbral_max_pain(S, calls, puts)
                 direccion, confianza, bullets = consenso_direccional_0dte(
-                    max_pain, S, status_g, pc_df, sm_calls, sm_puts, zero_gamma, call_wall, put_wall
+                    max_pain, S, status_g, pc_df, sm_calls, sm_puts, zero_gamma, call_wall, put_wall,
+                    umbral_max_pain=umbral_mp
                 )
 
                 dist = S - max_pain
-                print(f"\n  Max Pain 0DTE: ${max_pain:.2f}  (distancia: {dist:+.2f})")
+                print(f"\n  Max Pain 0DTE: ${max_pain:.2f}  (distancia: {dist:+.2f}, umbral ±{umbral_mp:.2f})")
                 print(f"  Posicionamiento dealers: {status_g}")
-                print(f"  Net GEX real: {net_g:,.0f}")
+                print(f"  Net GEX real: {net_g:,.0f}  ({net_g * S * 0.01:,.0f} $ por 1%)")
                 print(f"  Gamma Flip: {'$'+format(zero_gamma, ',.2f') if zero_gamma is not None else 'sin cruce en rango'}")
                 print(f"  Muro Calls (resistencia): {'$'+format(call_wall, ',.0f') if call_wall is not None else 'n/d'}")
                 print(f"  Muro Puts (soporte): {'$'+format(put_wall, ',.0f') if put_wall is not None else 'n/d'}")
@@ -1613,6 +1857,22 @@ def main(ticker, refresh_seconds=60):
         print("\n\n🛑 Detenido por el usuario. Servidor cerrado.")
 
 
+def _parse_args(argv):
+    """
+    CLI opcional; sin argumentos se conserva el modo interactivo.
+    El subyacente también puede venir de OPTIONS_TICKER y la base SPX de SPX_BASIS.
+    """
+    p = argparse.ArgumentParser(description="Análisis 0DTE / intradía de opciones con Polygon.io")
+    p.add_argument("--ticker", type=lambda s: s.strip().upper(), default=None,
+                   help=f"Subyacente (SPY, SPX, ...). Por defecto {TICKER_POR_DEFECTO}.")
+    p.add_argument("--refresh", type=int, default=None,
+                   help=f"Segundos entre ciclos (mín. {MIN_REFRESH_SECONDS}).")
+    p.add_argument("--spx-basis", type=float, default=None,
+                   help="Base SPX − US500 en puntos, de respaldo si no se calcula por paridad "
+                        f"(por defecto SPX_BASIS o {SPX_BASIS_DEFAULT:+.2f}).")
+    return p.parse_args(argv)
+
+
 if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
@@ -1622,13 +1882,20 @@ if __name__ == "__main__":
     print("   Auto-actualización periódica")
     print("="*80 + "\n")
 
-    ticker = input("Ticker (ej. SPY, QQQ, AAPL): ").strip().upper()
-    if not ticker:
-        print("❌ Ticker inválido.")
-        sys.exit(1)
+    args = _parse_args(sys.argv[1:])
+    if args.spx_basis is not None:
+        SPX_BASIS_DEFAULT = args.spx_basis
 
-    intervalo_input = input(f"Intervalo de actualización en segundos (mín. {MIN_REFRESH_SECONDS}, Enter = 60): ").strip()
-    refresh_seconds = int(intervalo_input) if intervalo_input.isdigit() else 60
+    ticker = args.ticker or os.environ.get("OPTIONS_TICKER", "").strip().upper()
+    if not ticker:
+        ticker = input(f"Ticker (ej. SPY, SPX, QQQ; Enter = {TICKER_POR_DEFECTO}): ").strip().upper() \
+            or TICKER_POR_DEFECTO
+
+    if args.refresh is not None:
+        refresh_seconds = args.refresh
+    else:
+        intervalo_input = input(f"Intervalo de actualización en segundos (mín. {MIN_REFRESH_SECONDS}, Enter = 60): ").strip()
+        refresh_seconds = int(intervalo_input) if intervalo_input.isdigit() else 60
     if refresh_seconds < MIN_REFRESH_SECONDS:
         print(f"   Intervalo mínimo: {MIN_REFRESH_SECONDS}s — se usa {MIN_REFRESH_SECONDS}s.")
         refresh_seconds = MIN_REFRESH_SECONDS

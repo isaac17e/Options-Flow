@@ -49,11 +49,13 @@ The project was built in five blocks, each with its own module and test script.
 - Aggregates by strike across several expirations and locates the **gamma flip**: the zero crossing of the GEX profile closest to spot.
 
 ### Block 5 · Dashboard (`app.py`)
-A Streamlit app with a sidebar to choose the ticker (default `SPY`), the expiration used for the density, how many expirations enter the dealer profile, and the dividend yield. It shows:
+A Streamlit app with a sidebar to choose the underlying (`SPY` by default, `SPX`, or any other ticker), the expiration used for the density, how many expirations enter the dealer profile, and the dividend yield. It shows:
 - **Left column**: the risk-neutral density with forward and spot markers, its mean, standard deviation, percentiles and an arbitrage-free flag.
 - **Right column**: GEX, VEX and CEX bars by strike (±15% around spot), the current gamma regime and the gamma flip level.
 
 Data is cached for 60 seconds.
+
+**SPX.** On Capital.com the epic `SPX` is the stock Spirax Sarco, so SPX uses the `US500` index CFD (the instrument type must be `INDICES`, otherwise it is rejected). Spot = `US500` mid + basis, where the basis (SPX − US500, about +1 pt) is recomputed each cycle as the median put-call-parity forward (`K + C − P`) of the ATM strikes of the nearest expiration minus the `US500` mid from ~15 minutes earlier (to offset Polygon's delay, via `GET /prices`). If it cannot be computed it falls back to the sidebar value (default `SPX_BASIS`, `1.0`). The sidebar shows the source and the basis. Polygon is queried with two tickers: reference contracts with `SPX` (includes SPXW) and the snapshot with `I:SPX` (with `SPX` it comes without IV or greeks); the mapping lives in `POLYGON_TICKERS`. Note that the SVI density is calibrated for longer maturities and is not reliable for 1DTE SPX.
 
 ---
 

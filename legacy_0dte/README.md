@@ -45,16 +45,25 @@ export CAPITAL_API_PASSWORD="tu_password_api"
 export CAPITAL_API_URL="https://demo-api-capital.backend-capital.com/api/v1"
 ```
 
-La sesión de Capital.com se abre una vez, se reutiliza entre ciclos, se renueva si caduca (401) y se cierra al salir. Los tokens nunca se imprimen. El ticker se usa como epic de Capital.com (`SPY` → `SPY`).
+La sesión de Capital.com se abre una vez, se reutiliza entre ciclos, se renueva si caduca (401) y se cierra al salir. Los tokens nunca se imprimen. El ticker se traduce a un epic de Capital.com con un mapa explícito (`CAPITAL_EPICS`): `SPY` → `SPY` y `SPX` → `US500` (el epic `SPX` de Capital.com es la acción Spirax Sarco, no el índice). Para `US500` se exige que el instrumento sea `INDICES`; con otro tipo se rechaza. Los demás tickers usan su propio símbolo.
+
+## SPX
+
+`SPX` se elige como subyacente (ver Uso). Detalles:
+- **Polygon con dos tickers**: los contratos de referencia se piden con `SPX` (incluye SPXW) y el snapshot con `I:SPX` (con `SPX` llega sin IV ni griegas). Mapa en `POLYGON_TICKERS`.
+- **Spot** = mid de US500 + base. La base (SPX − US500, ≈ +1 pt) se calcula en cada ciclo como la mediana del forward por paridad put-call (`K + C − P`) de los 7 strikes ATM de la cadena menos el mid de US500 de hace 15 minutos (`GET /prices`, para compensar el retraso de Polygon). Si no se puede calcular (sin strikes ATM, sin barra, base > 0,5% del precio, error de red) se usa el parámetro `SPX_BASIS` / `--spx-basis` (por defecto `1.0`). El dashboard muestra la fuente y la base.
+- **Umbrales escalados**: el voto de max pain usa `0,5 × straddle ATM` (acotado a 0,1%–0,6% del spot; respaldo 0,3% del spot) en lugar de $2 fijos; el Net GEX "fuerte" se mide en dólares por 1% de movimiento (`5e8 × 670 × 0,01`, igual que antes en SPY@670); el precio mínimo de smart money escala con `spot / 670`.
+- Limitación: en vencimientos mensuales conviven SPX (AM) y SPXW (PM) con los mismos strikes y el análisis por strike los junta; la paridad sí los separa.
 
 ## Uso
 
 ```bash
-python Options_Trade_polygon.py
+python Options_Trade_polygon.py                          # interactivo (Enter = SPY)
+python Options_Trade_polygon.py --ticker SPX --refresh 60 --spx-basis 1.0
 ```
 
-El script pide:
-1. **Ticker** (ej. `SPY`, `QQQ`, `AAPL`).
+El subyacente también se puede fijar con la variable `OPTIONS_TICKER`. Sin argumentos el script pide:
+1. **Ticker** (ej. `SPY`, `SPX`, `QQQ`, `AAPL`; Enter = `SPY`).
 2. **Intervalo de actualización** en segundos (Enter = 60; mínimo 15).
 
 Para automatizarlo sin prompts: `python -c "import Options_Trade_polygon as m; m.main('SPY', 60)"`. Importar el módulo no tiene efectos secundarios. Los tests offline viven en `tests/test_legacy_0dte.py` en la raíz del repo.

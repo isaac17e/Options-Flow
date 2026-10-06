@@ -38,9 +38,17 @@ class Settings:
     capital_identifier: str = ""
     capital_api_password: str = ""
     capital_api_url: str = "https://demo-api-capital.backend-capital.com/api/v1"
-    # Epic de Capital.com usado como spot de SPY. Cualquier otro ticker se
-    # pide usando su propio símbolo como epic.
+    # Epic de Capital.com usado como spot de SPY. SPX usa US500 (en Capital.com
+    # el epic "SPX" es Spirax Sarco, una acción; ver CAPITAL_INSTRUMENTS en
+    # src/data/capital_client.py). Cualquier otro ticker usa su propio símbolo.
     capital_epic: str = "SPY"
+    # Base SPX - US500 en puntos (SPX = mid de US500 + base). Es el respaldo
+    # cuando no se puede calcular la base por paridad put-call en el ciclo.
+    # Medido el 2026-10-05: US500 ≈ SPX - 1, o sea base ≈ +1.
+    spx_basis: float = 1.0
+    # Retraso de las opciones de Polygon (plan delayed): la base se calcula
+    # contra el precio de US500 de hace este número de minutos.
+    options_delay_minutes: int = 15
 
 
 _PLACEHOLDER_PREFIX = "tu_"  # valores de ejemplo de .env.template
@@ -51,6 +59,16 @@ def _env(name: str, default: str = "") -> str:
     if not value or value.startswith(_PLACEHOLDER_PREFIX):
         return default
     return value
+
+
+def _env_float(name: str, default: float) -> float:
+    value = _env(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        raise EnvironmentError(f"{name}={value!r} no es un número.") from None
 
 
 def load_settings() -> Settings:
@@ -67,6 +85,8 @@ def load_settings() -> Settings:
         capital_api_password=_env("CAPITAL_API_PASSWORD"),
         capital_api_url=_env("CAPITAL_API_URL", Settings.capital_api_url),
         capital_epic=_env("CAPITAL_EPIC", Settings.capital_epic),
+        spx_basis=_env_float("SPX_BASIS", Settings.spx_basis),
+        options_delay_minutes=int(_env_float("OPTIONS_DELAY_MINUTES", Settings.options_delay_minutes)),
     )
 
 

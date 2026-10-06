@@ -45,6 +45,10 @@ class OptionContract:
 
     snapshot_time: Optional[datetime] = None
 
+    # Cierre del día del contrato (día en curso o último): respaldo de precio
+    # cuando no hay last trade ni quote (se usa en la paridad put-call del SPX).
+    day_close: Optional[float] = None
+
     @property
     def mid_price(self) -> Optional[float]:
         if self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > 0:
@@ -67,6 +71,11 @@ class UnderlyingSnapshot:
     ticker: str
     spot_price: float
     snapshot_time: datetime
+    # Trazabilidad del spot. Para SPX: spot_price = raw_price (mid de US500) + basis.
+    source: str = "Capital.com (mid bid/offer)"
+    raw_price: Optional[float] = None   # mid del epic de Capital.com, sin base
+    basis: float = 0.0                  # puntos sumados a raw_price (0 si no aplica)
+    basis_source: str = ""              # "paridad put-call ..." o "parámetro (respaldo): motivo"
 
 
 @dataclass
