@@ -6,7 +6,7 @@ Dashboard institucional en tiempo casi real para lectura de flujo de opciones **
 
 ## Qué calcula
 
-- **Precio spot** de **Capital.com** (punto medio bid/offer de `GET /markets/{ticker}`). Si Capital.com falla, se estima por paridad put-call sobre la cadena ya descargada en el ciclo (sin llamadas extra). El dashboard muestra la fuente y la hora del spot.
+- **Precio spot** de **Capital.com** (punto medio bid/offer del CFD que corresponde al subyacente, resuelto por `tickers.py`; en índices se resta la base CFD − índice). Si Capital.com falla, se estima por paridad put-call sobre la cadena ya descargada en el ciclo (sin llamadas extra). El dashboard muestra la fuente y la hora del spot.
 - **Vencimiento 0DTE real** si existe (vence hoy); si no, cae automáticamente al vencimiento vigente más próximo. Se obtiene con una sola llamada al endpoint de referencia.
 - **Greeks Black-Scholes** (delta, gamma) por contrato. En cada contrato sin IV de Polygon la IV se **infiere invirtiendo BSM** sobre el último precio disponible. Los contratos con OI en los que la inversión falla quedan fuera del GEX y se cuentan en un aviso visible del dashboard.
 - **GEX (Gamma Exposure)** por strike y **Net GEX**, con convención estándar de posicionamiento de dealers: gamma de calls positiva, gamma de puts negativa.
@@ -45,15 +45,7 @@ export CAPITAL_API_PASSWORD="tu_password_api"
 export CAPITAL_API_URL="https://demo-api-capital.backend-capital.com/api/v1"
 ```
 
-La sesión de Capital.com se abre una vez, se reutiliza entre ciclos, se renueva si caduca (401) y se cierra al salir. Los tokens nunca se imprimen. El ticker se traduce a un epic de Capital.com con un mapa explícito (`CAPITAL_EPICS`): `SPY` → `SPY` y `SPX` → `US500` (el epic `SPX` de Capital.com es la acción Spirax Sarco, no el índice). Para `US500` se exige que el instrumento sea `INDICES`; con otro tipo se rechaza. Los demás tickers usan su propio símbolo.
-
-## SPX
-
-`SPX` se elige como subyacente (ver Uso). Detalles:
-- **Polygon con dos tickers**: los contratos de referencia se piden con `SPX` (incluye SPXW) y el snapshot con `I:SPX` (con `SPX` llega sin IV ni griegas). Mapa en `POLYGON_TICKERS`.
-- **Spot** = mid de US500 + base. La base (SPX − US500, ≈ +1 pt) se calcula en cada ciclo como la mediana del forward por paridad put-call (`K + C − P`) de los 7 strikes ATM de la cadena menos el mid de US500 de hace 15 minutos (`GET /prices`, para compensar el retraso de Polygon). Si no se puede calcular (sin strikes ATM, sin barra, base > 0,5% del precio, error de red) se usa el parámetro `SPX_BASIS` / `--spx-basis` (por defecto `1.0`). El dashboard muestra la fuente y la base.
-- **Umbrales escalados**: el voto de max pain usa `0,5 × straddle ATM` (acotado a 0,1%–0,6% del spot; respaldo 0,3% del spot) en lugar de $2 fijos; el Net GEX "fuerte" se mide en dólares por 1% de movimiento (`5e8 × 670 × 0,01`, igual que antes en SPY@670); el precio mínimo de smart money escala con `spot / 670`.
-- Limitación: en vencimientos mensuales conviven SPX (AM) y SPXW (PM) con los mismos strikes y el análisis por strike los junta; la paridad sí los separa.
+La sesión de Capital.com se abre una vez, se reutiliza entre ciclos, se renueva si caduca (401) y se cierra al salir. Los tokens nunca se imprimen. El epic de Capital.com lo resuelve `tickers.py` (ver «Multi-ticker»).
 
 ## Uso
 
@@ -80,3 +72,35 @@ El script no está limitado a índices — corre para cualquier ticker con opcio
 - La T de Black-Scholes usa días enteros (un 0DTE usa un mínimo de 0,3 días, sea la hora que sea).
 - La IV inferida en strikes muy OTM/ilíquidos puede ser ruidosa entre ciclos (el `lastPrice` usado para invertir BSM no siempre refleja el mercado en tiempo real).
 - El consenso direccional es una heurística de lectura de flujo, no una señal de trading garantizada.
+
+## Multi-ticker (`tickers.py`)
+- **Índices** (tabla fija). La referencia de contratos usa el ticker sin prefijo y el snapshot el ticker de índice, porque con `SPX` Polygon no trae IV ni griegas. El CFD debe ser de tipo `INDICES`.
+
+  | Ticker | Referencia | Snapshot | CFD |
+  |---|---|---|---|
+  | SPX (incluye SPXW) | `SPX` | `I:SPX` | `US500` |
+  | NDX | `NDX` | `I:NDX` | `US100` |
+  | RUT | `RUT` | `I:RUT` | `RTY` |
+
+- **ETFs y acciones**: el mismo ticker en Polygon. En Capital.com se busca con `GET /markets?searchTerm=<ticker>` y solo se acepta un instrumento `SHARES` con epic idéntico. Si no lo hay, vale el único `SHARES` cuyo precio esté a ≤1 % del spot.
+- **Chequeo de precio:** el precio del CFD siempre se compara con el spot implícito por paridad de la propia cadena (mediana de los 7 strikes más ATM), con tolerancia de 1 %. Así se descartan colisiones de símbolo como `SPX` = Spirax Sarco. Si no hay coincidencia segura se lanza `TickerResolutionError`; el panel lo muestra en rojo y usa la paridad.
+- **Caché:** el mapa resuelto se guarda en `legacy_0dte/.ticker_map.json` (ignorado por git; se puede cambiar con `OPTIONS_FLOW_TICKER_CACHE`). El precio se vuelve a comprobar en cada resolución.
+- **Base** (índices): CFD − subyacente, medida con el CFD del instante al que corresponden los precios de opciones. En cada ciclo se compara la paridad put-call de la cadena (mediana de `K + C − P` en los 7 strikes ATM; SPX y SPXW no se mezclan) con el mid del CFD de hace 15 minutos (`GET /prices`, para compensar el retraso de Polygon); el spot en vivo es `mid(CFD) − base`, con la mediana móvil de las últimas muestras (`BasisTracker`, se descartan bases > 1 % del precio). Sin muestras (mercado cerrado, sin barra, error de red) se usa `SPX_BASIS` / `--spx-basis` (por defecto `1.0`, solo para SPX; 0 en NDX/RUT). El panel muestra el epic y la base.
+- Limitación: en vencimientos mensuales conviven SPX (AM) y SPXW (PM) con los mismos strikes y el análisis por strike los junta; la paridad sí los separa.
+
+## Umbrales adimensionales
+Todos los umbrales escalan con el precio o son adimensionales, así que valen para SPY, SPX o una acción de 100 USD:
+- `MAX_PAIN_PIN_PCT = 0.3 %` del spot: distancia al max pain para el voto direccional (antes eran 2 USD fijos, escala SPY).
+- `GEX_FUERTE_RATIO = 0.25`: |Net GEX| / Σ|GEX| para «FUERTE» (antes ±5e8 USD fijos).
+- `SMART_MONEY_MIN_PRICE_PCT = 0.015 %` del spot: prima mínima para smart money (antes 0,10 USD).
+
+## Decisión (`levels.py`, `decision.py`)
+- `levels.compute_levels(contratos, vencimiento, dias, S)` devuelve los niveles del panel (flip, muros, max pain, picos de gamma bruta, Net GEX, IV ATM y perfil por strike) en un dict.
+- `decision.decide(levels, live, state)` y `decision.manage(position, levels, live)` aplican las reglas de entrada, TP/stop y gestión. No colocan órdenes.
+  - Régimen LONG/SHORT gamma.
+  - Rechazo del siguiente strike atractivo (A/B) o ruptura del flip (C).
+  - Stop estructural que nunca se ensancha.
+  - TP en el siguiente strike atractivo, o en el strike más probable que pague R:R ≥ 1.
+  - Holding máximo de 75 min y entradas solo de 08:45 a 10:00 COT.
+- Todas las distancias son `max(pct·S, k·σ_h)`, con σ_h la desviación esperada en la ventana de holding a partir de la IV ATM. Por eso funcionan igual en un índice de 7.800 y en una acción de 100 USD (ver `tests/test_decision.py`).
+- `decision.position_size(...)`: 5 % del balance como margen al apalancamiento de la cuenta, redondeado hacia abajo al incremento y con el mínimo del broker.

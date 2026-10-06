@@ -204,6 +204,13 @@ def capital(monkeypatch):
     monkeypatch.setattr(legacy.atexit, "register", lambda fn: None)
     sesion = legacy.CapitalSession(base_url="https://capital.test/api/v1")
     monkeypatch.setattr(legacy, "_capital", sesion)
+
+    class ResolverFijo:     # SPY → epic SPY sin llamadas extra (tickers.py se prueba aparte)
+        def resolve(self, ticker, ref_price=None, refresh=False):
+            return legacy._tk.Resolution(ticker.upper(), ticker.upper(), ticker.upper(), ticker.upper(),
+                                         "SHARES", "share_cfd_parity_rolling")
+
+    monkeypatch.setattr(legacy, "_resolver", ResolverFijo())
     return sesion
 
 

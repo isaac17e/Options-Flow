@@ -5,3 +5,5 @@ __pycache__/
 *_0DTE_dashboard.html
 *_0DTE_data.json
 .env
+.ticker_map.json
+.ticker_map.json.tmp
