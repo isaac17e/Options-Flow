@@ -19,9 +19,9 @@ def main():
     client = PolygonClient()
 
     print(f"→ Consultando vencimientos disponibles de {TICKER}...")
-    expirations = client.get_available_expirations(TICKER)
+    expirations = client.get_available_expirations(TICKER, EXPIRATION_INDEX + 1)
     expiration = expirations[EXPIRATION_INDEX]
-    print(f"→ Vencimiento elegido: {expiration} (de {len(expirations)} disponibles)")
+    print(f"→ Vencimiento elegido: {expiration} (índice {EXPIRATION_INDEX})")
 
     print(f"→ Descargando cadena completa SOLO para {expiration}...")
     underlying = client.get_underlying_snapshot(TICKER)

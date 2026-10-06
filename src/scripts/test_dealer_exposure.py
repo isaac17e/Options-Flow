@@ -16,7 +16,7 @@ N_EXPIRATIONS = 6
 def main():
     client = PolygonClient()
 
-    expirations = client.get_available_expirations(TICKER)
+    expirations = client.get_available_expirations(TICKER, N_EXPIRATIONS)
     target_expirations = expirations[:N_EXPIRATIONS]
     underlying = client.get_underlying_snapshot(TICKER)
 

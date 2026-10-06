@@ -31,15 +31,43 @@ class Settings:
 
     request_timeout_seconds: int = 10
 
+    # --- Capital.com: fuente del precio spot en tiempo real ---
+    # Las credenciales no se exigen al importar (solo al pedir el spot, ver
+    # src/data/capital_client.py) para no romper módulos que no las usan.
+    capital_api_key: str = ""
+    capital_identifier: str = ""
+    capital_api_password: str = ""
+    capital_api_url: str = "https://demo-api-capital.backend-capital.com/api/v1"
+    # Epic de Capital.com usado como spot de SPY. Cualquier otro ticker se
+    # pide usando su propio símbolo como epic.
+    capital_epic: str = "SPY"
+
+
+_PLACEHOLDER_PREFIX = "tu_"  # valores de ejemplo de .env.template
+
+
+def _env(name: str, default: str = "") -> str:
+    value = os.getenv(name, "")
+    if not value or value.startswith(_PLACEHOLDER_PREFIX):
+        return default
+    return value
+
 
 def load_settings() -> Settings:
-    api_key = os.getenv("POLYGON_API_KEY")
-    if not api_key or api_key == "tu_api_key_aqui":
+    api_key = _env("POLYGON_API_KEY")
+    if not api_key:
         raise EnvironmentError(
             "POLYGON_API_KEY no está configurada. "
             "Copia .env.template a .env y coloca tu key real."
         )
-    return Settings(polygon_api_key=api_key)
+    return Settings(
+        polygon_api_key=api_key,
+        capital_api_key=_env("CAPITAL_API_KEY"),
+        capital_identifier=_env("CAPITAL_IDENTIFIER"),
+        capital_api_password=_env("CAPITAL_API_PASSWORD"),
+        capital_api_url=_env("CAPITAL_API_URL", Settings.capital_api_url),
+        capital_epic=_env("CAPITAL_EPIC", Settings.capital_epic),
+    )
 
 
 SETTINGS = load_settings()

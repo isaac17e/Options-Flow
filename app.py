@@ -12,7 +12,10 @@ from src.models.dealer_exposure import aggregate_dealer_exposure, find_gamma_fli
 st.set_page_config(page_title="Microestructura Cuantitativa", layout="wide")
 
 st.title("Dashboard de Microestructura Cuantitativa")
-st.caption("⚠️ Datos con retraso de ~15 minutos (plan Polygon.io delayed) — no aptos para ejecución de alta frecuencia")
+st.caption(
+    "⚠️ Opciones con retraso de ~15 minutos (plan Polygon.io delayed); spot en tiempo real "
+    "de Capital.com — no aptos para ejecución de alta frecuencia"
+)
 
 
 @st.cache_resource
@@ -35,56 +38,46 @@ with st.sidebar:
              "al alza y con él el centro del smile, la media del PDF y el gamma flip.",
     )
     dividend_yield = dividend_yield_pct / 100
-    refresh = st.button("🔄 Actualizar datos")
-
-if "refresh_key" not in st.session_state:
-    st.session_state["refresh_key"] = 0
-if refresh:
-    st.session_state["refresh_key"] += 1
-refresh_key = st.session_state["refresh_key"]
 
 
 @st.cache_data(ttl=60)
-def load_underlying(_client, ticker, _refresh_key):
+def load_underlying(_client, ticker):
     return _client.get_underlying_snapshot(ticker)
 
 
 @st.cache_data(ttl=60)
-def load_expirations(_client, ticker, _refresh_key):
-    return _client.get_available_expirations(ticker)
+def load_expirations(_client, ticker, max_expirations):
+    return _client.get_available_expirations(ticker, max_expirations)
 
 
 @st.cache_data(ttl=60)
-def load_chain_for_expiration(_client, ticker, expiration, _underlying, _refresh_key):
-    return _client.get_option_chain_snapshot(
-        ticker, expiration_date=expiration, max_contracts=1000, underlying=_underlying
-    )
+def load_chain_for_expiration(_client, ticker, expiration, _underlying):
+    return _client.get_option_chain_snapshot(ticker, expiration_date=expiration, underlying=_underlying)
 
 
 @st.cache_data(ttl=60)
-def load_dealer_chain(_client, ticker, expirations_tuple, _underlying, _refresh_key):
+def load_dealer_chain(_client, ticker, expirations_tuple, _underlying):
     all_contracts = []
     for exp in expirations_tuple:
-        chain = _client.get_option_chain_snapshot(
-            ticker, expiration_date=exp, max_contracts=1000, underlying=_underlying
-        )
+        chain = _client.get_option_chain_snapshot(ticker, expiration_date=exp, underlying=_underlying)
         all_contracts.extend(chain.filter_by_expiration(exp).contracts)
     return OptionChainSnapshot(underlying=_underlying, contracts=all_contracts)
 
 
 try:
-    underlying = load_underlying(client, ticker, refresh_key)
+    underlying = load_underlying(client, ticker)
 except Exception as e:
-    st.error(f"Error obteniendo spot: {e}")
+    st.error(f"Error obteniendo spot de Capital.com: {e}")
     st.stop()
 
 st.metric("Spot", f"{underlying.spot_price:.2f}")
 st.caption(
-    f"Última barra de datos: {underlying.snapshot_time.strftime('%Y-%m-%d %H:%M:%S')} "
-    f"(recuerda: puede ir hasta ~15 min por detrás del mercado real)"
+    f"Spot = punto medio bid/offer de Capital.com, actualizado: "
+    f"{underlying.snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}"
 )
 
-expirations = load_expirations(client, ticker, refresh_key)
+# Solo se piden los vencimientos que se van a usar (PDF y dealers).
+expirations = load_expirations(client, ticker, max(expiration_index_pdf + 1, n_expirations_dealer))
 
 if not expirations:
     st.error(f"No se encontraron vencimientos de opciones para {ticker}. Verifica el ticker.")
@@ -99,7 +92,7 @@ with col1:
     st.write(f"Vencimiento: **{expiration_choice}**")
 
     try:
-        chain = load_chain_for_expiration(client, ticker, expiration_choice, underlying, refresh_key)
+        chain = load_chain_for_expiration(client, ticker, expiration_choice, underlying)
         sub_chain = chain.filter_by_expiration(expiration_choice)
         tte_years = sub_chain.contracts[0].time_to_expiration_years
         forward = client.estimate_forward_price(underlying.spot_price, tte_years, dividend_yield=dividend_yield)
@@ -141,7 +134,7 @@ with col2:
 
     try:
         expirations_tuple = tuple(expirations[:n_expirations_dealer])
-        dealer_chain = load_dealer_chain(client, ticker, expirations_tuple, underlying, refresh_key)
+        dealer_chain = load_dealer_chain(client, ticker, expirations_tuple, underlying)
         profile = aggregate_dealer_exposure(dealer_chain, underlying.spot_price, dividend_yield=dividend_yield)
         flip = find_gamma_flip(profile, underlying.spot_price)
 
@@ -181,6 +174,6 @@ with col2:
         st.error(f"Error calculando exposición de dealers: {e}")
 
 st.caption(
-    "Actualiza manualmente con el botón de la barra lateral. Dado el retraso de 15 minutos "
-    "de tu plan de datos, un refresco automático más frecuente que eso no aporta información nueva."
+    "Los datos se guardan en caché 60 s: al recargar la página o cambiar un parámetro pasado "
+    "ese tiempo se vuelven a pedir. Las opciones van ~15 min por detrás del mercado."
 )

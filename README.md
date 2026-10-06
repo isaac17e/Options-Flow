@@ -15,10 +15,12 @@ The project was built in five blocks, each with its own module and test script.
 
 ### Block 1 · Data (`src/data/`)
 - `polygon_client.py`: REST client for Polygon.io with retries and transparent pagination.
-  - Spot price from the most recent 1-minute bar (works with delayed data plans).
-  - Available expirations from the contracts reference endpoint.
+  - Spot price delegated to `capital_client.py` (the Polygon plan has no same-day stock bars).
+  - Retries on HTTP 429 (honoring `Retry-After`) and transient 5xx, with exponential backoff and jitter.
+  - The nearest N expirations from the contracts reference endpoint (stops paging once N are found).
   - Full options chain snapshot (IV, Greeks, open interest) for each expiration.
   - Forward price by cost of carry, `F = S·e^((r−q)T)`. Put-call parity isn't used because the data plan has no option bid/ask.
+- `capital_client.py`: real-time spot from Capital.com, mid of bid/offer from `GET /markets/{epic}`.
 - `models.py`: `OptionContract`, `OptionChainSnapshot` and `UnderlyingSnapshot` data classes.
 
 ### Block 2 · SVI smile calibration (`src/models/svi.py`, `svi_inputs.py`)
@@ -51,7 +53,7 @@ A Streamlit app with a sidebar to choose the ticker (default `SPY`), the expirat
 - **Left column**: the risk-neutral density with forward and spot markers, its mean, standard deviation, percentiles and an arbitrage-free flag.
 - **Right column**: GEX, VEX and CEX bars by strike (±15% around spot), the current gamma regime and the gamma flip level.
 
-Data is cached for 60 seconds, and a button forces a refresh.
+Data is cached for 60 seconds.
 
 ---
 
@@ -68,6 +70,7 @@ Data is cached for 60 seconds, and a button forces a refresh.
 ├── src/
 │   ├── data/
 │   │   ├── models.py         # Option and underlying data classes
+│   │   ├── capital_client.py # Capital.com spot price client
 │   │   └── polygon_client.py # Polygon.io REST client
 │   ├── models/
 │   │   ├── svi.py            # SVI calibration + no-arbitrage check
@@ -91,10 +94,10 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt        # or requirements-dev.txt to also run tests
 
-cp .env.template .env                  # then set POLYGON_API_KEY in .env
+cp .env.template .env                  # then set POLYGON_API_KEY and the CAPITAL_* credentials in .env
 ```
 
-`config.py` loads the key from `.env` and stops with a clear error if it is missing. The default risk-free rate (4.5%) and dividend yield (1.3%) are also defined there.
+`config.py` loads the keys from `.env` and stops with a clear error if `POLYGON_API_KEY` is missing. The Capital.com credentials (`CAPITAL_API_KEY`, `CAPITAL_IDENTIFIER`, `CAPITAL_API_PASSWORD`, plus optional `CAPITAL_API_URL` and `CAPITAL_EPIC`) are checked when the spot is first requested. The default risk-free rate (4.5%) and dividend yield (1.3%) are also defined there.
 
 ## Usage
 
@@ -130,7 +133,7 @@ pytest
 
 ## Notes
 
-- With a delayed Polygon plan, data lags the market by **about 15 minutes**, so refreshing more often than the 60-second cache adds nothing.
+- With a delayed Polygon plan, options data lags the market by **about 15 minutes**. The spot comes from Capital.com in real time.
 - Use `python3 -m streamlit` so the app runs in the same virtual environment as the dependencies.
 - If you rotate your Polygon API key, only `.env` needs to change.
 

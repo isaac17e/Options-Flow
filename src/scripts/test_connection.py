@@ -3,9 +3,9 @@ src/scripts/test_connection.py
 --------------------------------
 Prueba end-to-end del Bloque 1:
   1. Conecta con Polygon.
-  2. Trae el spot del subyacente.
+  2. Trae el spot del subyacente (Capital.com).
   3. Trae la cadena de opciones para el vencimiento más próximo.
-  4. Estima el Forward vía paridad Put-Call.
+  4. Estima el Forward vía costo de acarreo.
   5. Imprime un resumen limpio.
 
 Ejecutar desde la raíz del proyecto:
@@ -32,13 +32,14 @@ def main():
     underlying = client.get_underlying_snapshot(TICKER)
     print(f"  Spot: {underlying.spot_price} @ {underlying.snapshot_time}")
 
-    print(f"→ Descargando cadena de opciones completa de {TICKER}...")
-    chain = client.get_option_chain_snapshot(TICKER, max_contracts=2000)
+    nearest_expiration = client.get_available_expirations(TICKER, 1)[0]
+    print(f"→ Descargando cadena de {TICKER} para el vencimiento más próximo ({nearest_expiration})...")
+    chain = client.get_option_chain_snapshot(
+        TICKER, expiration_date=nearest_expiration, underlying=underlying
+    )
     df = chain.to_dataframe()
     print(f"  Contratos descargados: {len(df)}")
-    print(f"  Vencimientos disponibles: {chain.expirations()[:5]} ...")
 
-    nearest_expiration = chain.expirations()[0]
     print(f"→ Estimando Forward para vencimiento {nearest_expiration}...")
 
     # Tiempo a expiración en años, tomado del primer contrato de esa fecha

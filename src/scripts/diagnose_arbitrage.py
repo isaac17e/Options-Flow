@@ -34,7 +34,7 @@ def g_function(k_grid, params):
 
 def main():
     client = PolygonClient()
-    expirations = client.get_available_expirations(TICKER)
+    expirations = client.get_available_expirations(TICKER, EXPIRATION_INDEX + 1)
     expiration = expirations[EXPIRATION_INDEX]
     underlying = client.get_underlying_snapshot(TICKER)
     chain = client.get_option_chain_snapshot(TICKER, expiration_date=expiration, max_contracts=1000)
