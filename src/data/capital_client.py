@@ -25,6 +25,7 @@ trae precio en este plan, así que si Capital.com falla se reporta el error.
 from __future__ import annotations
 import dataclasses
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -43,6 +44,12 @@ CAPITAL_INSTRUMENTS = {
     "SPX": ("US500", "INDICES"),
     "SPY": ("SPY", None),
 }
+
+# Reintentos ante fallos de red (incluido el timeout), 429 y 5xx transitorios.
+# Todas las peticiones del cliente son de lectura o abren sesión: reintentar es seguro.
+MAX_ATTEMPTS = 3
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRY_BACKOFF_SECONDS = 1.0
 
 # La barra histórica de US500 usada para la base debe estar a lo sumo a este
 # número de minutos del instante buscado (si no, mercado cerrado / sin datos).
@@ -78,20 +85,38 @@ class CapitalClient:
     # ------------------------------------------------------------------
     # Sesión
     # ------------------------------------------------------------------
-    def _login(self) -> dict:
-        url = f"{self._base_url}/session"
+    def _send(self, call, url: str, **kwargs) -> requests.Response:
+        """
+        `call` (self._session.get / .post) con timeout (conexión, lectura) y hasta
+        MAX_ATTEMPTS intentos ante fallos de red, 429 y 5xx. Tras el último intento
+        un fallo de red lanza CapitalClientError y un 429/5xx se devuelve tal cual.
+        """
+        timeout = self._settings.request_timeout
+        for attempt in range(1, MAX_ATTEMPTS):
+            try:
+                resp = call(url, timeout=timeout, **kwargs)
+                if resp.status_code not in RETRYABLE_STATUS:
+                    return resp
+                error = f"HTTP {resp.status_code}"
+            except requests.RequestException as exc:
+                error = str(exc)
+            logger.warning("Capital.com %s en %s; reintento %d/%d", error, url, attempt, MAX_ATTEMPTS - 1)
+            time.sleep(RETRY_BACKOFF_SECONDS * attempt)
         try:
-            resp = self._session.post(
-                url,
-                headers={"X-CAP-API-KEY": self._settings.capital_api_key},
-                json={
-                    "identifier": self._settings.capital_identifier,
-                    "password": self._settings.capital_api_password,
-                },
-                timeout=self._settings.request_timeout_seconds,
-            )
+            return call(url, timeout=timeout, **kwargs)
         except requests.RequestException as exc:
-            raise CapitalClientError(f"Fallo al abrir sesión en Capital.com: {exc}") from exc
+            raise CapitalClientError(f"Fallo de red con {url} tras {MAX_ATTEMPTS} intentos: {exc}") from exc
+
+    def _login(self) -> dict:
+        resp = self._send(
+            self._session.post,
+            f"{self._base_url}/session",
+            headers={"X-CAP-API-KEY": self._settings.capital_api_key},
+            json={
+                "identifier": self._settings.capital_identifier,
+                "password": self._settings.capital_api_password,
+            },
+        )
 
         if resp.status_code != 200:
             # No se incluye el body de la petición: lleva la contraseña.
@@ -113,12 +138,7 @@ class CapitalClient:
         # se reabre una sola vez.
         for attempt in range(2):
             headers = self._auth_headers or self._login()
-            try:
-                resp = self._session.get(
-                    url, headers=headers, timeout=self._settings.request_timeout_seconds
-                )
-            except requests.RequestException as exc:
-                raise CapitalClientError(f"Fallo al consultar {url}: {exc}") from exc
+            resp = self._send(self._session.get, url, headers=headers)
 
             if resp.status_code == 401 and attempt == 0:
                 self._auth_headers = None

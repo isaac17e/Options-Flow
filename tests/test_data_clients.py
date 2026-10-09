@@ -16,7 +16,7 @@ import pytest
 import requests
 
 from config import Settings
-from src.data import polygon_client
+from src.data import capital_client, polygon_client
 from src.data.capital_client import CapitalClient, CapitalClientError
 from src.data.models import UnderlyingSnapshot
 from src.data.polygon_client import PolygonClient, PolygonClientError
@@ -80,12 +80,12 @@ def test_capital_spot_is_mid_of_bid_offer():
     assert post_args[0] == f"{CAPITAL_URL}/session"
     assert post_kwargs["headers"] == {"X-CAP-API-KEY": "cap-key"}
     assert post_kwargs["json"] == {"identifier": "user@example.com", "password": "secret"}
-    assert post_kwargs["timeout"] == SETTINGS.request_timeout_seconds
+    assert post_kwargs["timeout"] == SETTINGS.request_timeout == (5.0, 20.0)
 
     get_args, get_kwargs = client._session.get.call_args
     assert get_args[0] == f"{CAPITAL_URL}/markets/SPY"
     assert get_kwargs["headers"] == {"CST": "cst-1", "X-SECURITY-TOKEN": "xst-1"}
-    assert get_kwargs["timeout"] == SETTINGS.request_timeout_seconds
+    assert get_kwargs["timeout"] == SETTINGS.request_timeout
 
 
 def test_capital_reuses_session_and_relogs_once_on_401():
@@ -98,6 +98,31 @@ def test_capital_reuses_session_and_relogs_once_on_401():
 
     assert snap.spot_price == pytest.approx(780.5)
     assert client._session.post.call_count == 2  # login inicial + renovación tras el 401
+
+
+def test_capital_retries_network_timeouts_and_5xx(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(capital_client.time, "sleep", sleeps.append)
+    client = CapitalClient(SETTINGS)
+    client._session.post = Mock(side_effect=[requests.ConnectTimeout("connect"), _login_ok()])
+    client._session.get = Mock(side_effect=[requests.ReadTimeout("read"), _resp(503), _market(774.0, 774.5)])
+
+    snap = client.get_underlying_snapshot("SPY")
+
+    assert snap.spot_price == pytest.approx(774.25)
+    assert client._session.post.call_count == 2
+    assert client._session.get.call_count == 3
+    assert sleeps == [1.0, 1.0, 2.0]
+
+
+def test_capital_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr(capital_client.time, "sleep", lambda s: None)
+    client = CapitalClient(SETTINGS)
+    client._session.post = Mock(return_value=_login_ok())
+    client._session.get = Mock(side_effect=requests.ReadTimeout("read"))
+    with pytest.raises(CapitalClientError, match="tras 3 intentos"):
+        client.get_underlying_snapshot("SPY")
+    assert client._session.get.call_count == capital_client.MAX_ATTEMPTS
 
 
 def test_capital_rejected_login_raises():

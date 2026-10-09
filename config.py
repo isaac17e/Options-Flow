@@ -29,7 +29,10 @@ class Settings:
     # ticker desde la UI cuando el subyacente tenga un yield distinto.
     default_dividend_yield: float = 0.013
 
-    request_timeout_seconds: int = 10
+    # Timeout de cada petición HTTP: (conexión, lectura) en segundos. Sin él,
+    # requests espera para siempre en una conexión TCP muerta (p. ej. tras
+    # suspender la máquina con una conexión keep-alive abierta).
+    request_timeout: tuple = (5.0, 20.0)
 
     # --- Capital.com: fuente del precio spot en tiempo real ---
     # Las credenciales no se exigen al importar (solo al pedir el spot, ver

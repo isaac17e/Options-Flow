@@ -139,6 +139,66 @@ def test_polygon_agota_reintentos(monkeypatch, sleeps):
     assert len(sleeps) == legacy.MAX_RETRIES
 
 
+def test_polygon_usa_timeout_de_conexion_y_lectura(monkeypatch, sleeps):
+    vistos = []
+
+    def fake_get(url, params=None, timeout=None):
+        vistos.append(timeout)
+        return FakeResponse(200, {"status": "OK"})
+
+    monkeypatch.setattr(legacy.requests, "get", fake_get)
+    legacy._polygon_get("/v3/x")
+    assert vistos == [legacy.HTTP_TIMEOUT] == [(5, 20)]
+
+
+def test_polygon_reintenta_timeout_y_respeta_el_plazo_total(monkeypatch, sleeps):
+    reloj = [0.0]
+    monkeypatch.setattr(legacy.time, "monotonic", lambda: reloj[0])
+
+    def fake_get(url, params=None, timeout=None):
+        reloj[0] += 30.0                    # cada intento tarda 30 s en fallar
+        raise requests.ReadTimeout("read")
+
+    monkeypatch.setattr(legacy.requests, "get", fake_get)
+    with pytest.raises(RuntimeError, match="ReadTimeout|read"):
+        legacy._polygon_get("/v3/x")
+    # 30 + espera (1–2 s) ≤ 60 → reintento; 60 + espera > 60 → se rinde sin agendar otro
+    assert len(sleeps) == 1
+
+
+def test_capital_legacy_reintenta_fallos_de_red(monkeypatch, sleeps):
+    class Http:
+        def __init__(self):
+            self.gets = 0
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            assert timeout == legacy.HTTP_TIMEOUT
+            return FakeResponse(200, {}, {"CST": "c", "X-SECURITY-TOKEN": "t"})
+
+        def get(self, url, headers=None, timeout=None):
+            self.gets += 1
+            if self.gets < 3:
+                raise requests.ConnectionError("reset")
+            return FakeResponse(200, {"ok": 1})
+
+        def delete(self, url, headers=None, timeout=None):
+            return FakeResponse(200)
+
+    s = legacy.CapitalSession()
+    s._http = Http()
+    monkeypatch.setattr(s, "_credenciales", lambda: {"CAPITAL_API_KEY": "k", "CAPITAL_IDENTIFIER": "i",
+                                                     "CAPITAL_API_PASSWORD": "p"})
+    assert s.get("/x") == {"ok": 1}
+    assert sleeps == [1.0, 2.0]
+
+    def siempre_timeout(url, headers=None, timeout=None):
+        raise requests.ReadTimeout("read")
+
+    s._http.get = siempre_timeout             # se rinde tras CAPITAL_MAX_ATTEMPTS
+    with pytest.raises(RuntimeError, match="3 intentos"):
+        s.get("/x")
+
+
 # ─────────────────────────────────────────────
 #  Vencimiento más próximo: una sola llamada
 # ─────────────────────────────────────────────

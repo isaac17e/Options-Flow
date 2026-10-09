@@ -82,7 +82,7 @@ class PolygonClient:
             retry_after = None
             try:
                 resp = self._session.get(
-                    url, params=params, timeout=self._settings.request_timeout_seconds
+                    url, params=params, timeout=self._settings.request_timeout
                 )
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_error = str(exc)

@@ -33,12 +33,20 @@ POLYGON_BASE_URL = "https://api.polygon.io"
 TICKER_POR_DEFECTO = "SPY"
 
 
+# Timeout de cada petición HTTP (Polygon y Capital.com): (conexión, lectura) en segundos.
+# Sin él, requests espera para siempre en una conexión TCP muerta (p. ej. tras suspender la máquina).
+HTTP_TIMEOUT = (5, 20)
+
 # Reintentos ante 429 (rate limit) y 5xx transitorios.
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 MAX_RETRIES = 5
 BACKOFF_BASE_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
 RETRY_AFTER_MAX_SECONDS = 120.0
+# Presupuesto total de una llamada a Polygon (peticiones + esperas): no se agenda un reintento
+# que lo supere, para que una llamada nunca bloquee a quien la usa (p. ej. el trader en vivo)
+# mucho más de un minuto.
+POLYGON_DEADLINE_SECONDS = 60.0
 
 # Intervalo mínimo entre ciclos: con menos, el bucle martillea a Polygon.
 MIN_REFRESH_SECONDS = 15
@@ -70,10 +78,11 @@ def _polygon_get(path, params=None, full_url=None):
     url = full_url if full_url else f"{POLYGON_BASE_URL}{path}"
 
     ultimo_error = None
+    inicio = time.monotonic()
     for intento in range(MAX_RETRIES + 1):
         retry_after = None
         try:
-            resp = requests.get(url, params=params, timeout=15)
+            resp = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
         except (requests.ConnectionError, requests.Timeout) as e:
             ultimo_error = str(e)
         else:
@@ -90,10 +99,12 @@ def _polygon_get(path, params=None, full_url=None):
         if intento == MAX_RETRIES:
             break
         espera = retry_after if retry_after is not None else _backoff_seconds(intento)
+        if time.monotonic() - inicio + espera > POLYGON_DEADLINE_SECONDS:
+            break
         print(f"   ⏳ Polygon {ultimo_error} — reintento {intento + 1}/{MAX_RETRIES} en {espera:.1f}s")
         time.sleep(espera)
 
-    raise RuntimeError(f"Polygon falló tras {MAX_RETRIES} reintentos: {ultimo_error}")
+    raise RuntimeError(f"Polygon falló tras {intento} reintentos: {ultimo_error}")
 
 
 def _polygon_get_all_pages(path, params=None, max_pages=20):
@@ -133,8 +144,14 @@ CAPITAL_API_URL = os.environ.get(
 ).strip().rstrip("/")
 
 
+# Intentos por petición a Capital.com ante fallos de red (incluido el timeout), 429 y 5xx.
+# Solo se hacen GET y apertura/cierre de sesión: reintentar es seguro.
+CAPITAL_MAX_ATTEMPTS = 3
+CAPITAL_BACKOFF_SECONDS = 1.0
+
+
 class CapitalSession:
-    def __init__(self, base_url=CAPITAL_API_URL, timeout=10):
+    def __init__(self, base_url=CAPITAL_API_URL, timeout=HTTP_TIMEOUT):
         self.base_url = base_url
         self.timeout = timeout
         self._http = requests.Session()
@@ -150,13 +167,32 @@ class CapitalSession:
             raise RuntimeError(f"Faltan credenciales de Capital.com: {', '.join(faltan)}")
         return cred
 
+    def _send(self, call, url, **kwargs):
+        """`call` (self._http.get / .post) con timeout y hasta CAPITAL_MAX_ATTEMPTS intentos ante
+        fallos de red, 429 y 5xx; tras el último, un fallo de red lanza RuntimeError y un 429/5xx
+        se devuelve tal cual."""
+        for intento in range(1, CAPITAL_MAX_ATTEMPTS):
+            try:
+                resp = call(url, timeout=self.timeout, **kwargs)
+                if resp.status_code not in RETRYABLE_STATUS:
+                    return resp
+                error = f"HTTP {resp.status_code}"
+            except requests.RequestException as e:
+                error = str(e)
+            print(f"   ⏳ Capital.com {error} — reintento {intento}/{CAPITAL_MAX_ATTEMPTS - 1}")
+            time.sleep(CAPITAL_BACKOFF_SECONDS * intento)
+        try:
+            return call(url, timeout=self.timeout, **kwargs)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Capital.com sin respuesta tras {CAPITAL_MAX_ATTEMPTS} intentos: {e}") from e
+
     def _login(self):
         cred = self._credenciales()
-        resp = self._http.post(
+        resp = self._send(
+            self._http.post,
             f"{self.base_url}/session",
             headers={"X-CAP-API-KEY": cred["CAPITAL_API_KEY"]},
             json={"identifier": cred["CAPITAL_IDENTIFIER"], "password": cred["CAPITAL_API_PASSWORD"]},
-            timeout=self.timeout,
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Capital.com rechazó la sesión (HTTP {resp.status_code})")
@@ -172,7 +208,7 @@ class CapitalSession:
     def get(self, path):
         for intento in range(2):
             headers = self._auth or self._login()
-            resp = self._http.get(f"{self.base_url}{path}", headers=headers, timeout=self.timeout)
+            resp = self._send(self._http.get, f"{self.base_url}{path}", headers=headers)
             if resp.status_code == 401 and intento == 0:
                 self._auth = None   # sesión caducada → re-login una sola vez
                 continue
@@ -1612,7 +1648,7 @@ def main(ticker, refresh_seconds=60):
     try:
         while True:
             ciclo += 1
-            inicio_ciclo = time.time()
+            inicio_ciclo = time.monotonic()
             print(f"\n{'#'*80}")
             print(f"🔄 CICLO #{ciclo} — {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
             print(f"{'#'*80}")
@@ -1709,7 +1745,7 @@ def main(ticker, refresh_seconds=60):
                     server_iniciado = True
                     print("   La página se actualiza sola en vivo cada ciclo (sin recargar) — no hace falta reabrirla.")
 
-                elapsed = time.time() - inicio_ciclo
+                elapsed = time.monotonic() - inicio_ciclo
                 espera = max(refresh_seconds - elapsed, 1)
                 print(f"\n✅ Ciclo #{ciclo} completo en {elapsed:.1f}s — próxima actualización en {espera:.0f}s.")
                 print("   Presiona Ctrl+C para detener.")
