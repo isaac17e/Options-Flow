@@ -41,12 +41,6 @@
     "ast_hash": "4cafba0ede9b2d932da1744121c195fb",
     "semantic_hash": "4cafba0ede9b2d932da1744121c195fb"
   },
-  "src/__init__.py": {
-    "mtime": 1791244457.6323419,
-    "seen": 1791305977.018383,
-    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
-    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
-  },
   "src/data/__init__.py": {
     "mtime": 1791244457.6324341,
     "seen": 1791305977.018384,
@@ -76,12 +70,6 @@
     "seen": 1791305977.018386,
     "ast_hash": "4d2fc32d061ec9a5cb5e4809446e87bd",
     "semantic_hash": "4d2fc32d061ec9a5cb5e4809446e87bd"
-  },
-  "src/models/__init__.py": {
-    "mtime": 1791244457.6326919,
-    "seen": 1791305977.0183868,
-    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
-    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "src/models/black76.py": {
     "mtime": 1791244457.6327732,
@@ -262,17 +250,5 @@
     "seen": 1791305977.018404,
     "ast_hash": "ea527acb78fa25fa15368ba9e097db34",
     "semantic_hash": "ea527acb78fa25fa15368ba9e097db34"
-  },
-  "CLAUDE.md": {
-    "mtime": 1791469782.394695,
-    "seen": 1791469797.248009,
-    "ast_hash": "86a8f8b632925b2ac06771bcf6593fb8",
-    "semantic_hash": ""
-  },
-  "AGENTS.md": {
-    "mtime": 1791469785.3910208,
-    "seen": 1791469797.248008,
-    "ast_hash": "86a8f8b632925b2ac06771bcf6593fb8",
-    "semantic_hash": ""
   }
 }

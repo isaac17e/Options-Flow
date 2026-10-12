@@ -1,0 +1,5 @@
+# AGENTS.md/CLAUDE.md describen el propio grafo y __init__.py vacios: nodos sin conexion al codigo
+AGENTS.md
+CLAUDE.md
+src/__init__.py
+src/models/__init__.py
