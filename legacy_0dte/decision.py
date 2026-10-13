@@ -55,9 +55,9 @@ class Params:
     window_sigmas: float = 4.0
     max_trades: int = 3
     daily_loss_pct: float = 0.02
-    first_entry: time = time(8, 45)     # hora Colombia (COT)
-    last_entry: time = time(10, 0)
-    flat_time: time = time(14, 45)
+    first_entry: time = time(9, 45)     # hora de Nueva York (ET, America/New_York)
+    last_entry: time = time(11, 0)
+    flat_time: time = time(15, 45)
     point_value: float = 1.0            # USD por punto por unidad del CFD
     decimals: int = 2
 
@@ -198,7 +198,7 @@ def _next_attractive(levels: dict, up: bool, p: Params) -> Optional[float]:
 
 def decide(levels: dict, live: dict, state: dict, p: Params = Params()) -> dict:
     """
-    live : {"now": datetime COT, "bid", "offer", "base" (CFD − subyacente),
+    live : {"now": datetime ET (America/New_York, naive), "bid", "offer", "base" (CFD − subyacente),
             "bar5": {"high","low","close"} (última vela de 5 min cerrada, CFD),
             "close15": último cierre de 15 min (CFD)}
     state: {"trades_today", "pnl_today", "balance", "position", "size"}
@@ -208,7 +208,7 @@ def decide(levels: dict, live: dict, state: dict, p: Params = Params()) -> dict:
     if state.get("position"):
         return {**out, "action": "HOLD", "reason": "ya hay posición abierta (usar manage())"}
     if not (p.first_entry <= now.time() <= p.last_entry):
-        return {**out, "reason": f"fuera de la ventana de entradas {p.first_entry:%H:%M}–{p.last_entry:%H:%M} COT"}
+        return {**out, "reason": f"fuera de la ventana de entradas {p.first_entry:%H:%M}–{p.last_entry:%H:%M} ET"}
     if state.get("trades_today", 0) >= p.max_trades:
         return {**out, "reason": "máximo de trades del día alcanzado"}
     balance = float(state.get("balance", 1000.0))
@@ -280,7 +280,7 @@ def manage(position: dict, levels: dict, live: dict, p: Params = Params()) -> di
     if d * (mark - position["stop"]) <= 0:
         return dict(action="EXIT", reason="stop alcanzado", price=mark)
     if now.time() >= p.flat_time:
-        return dict(action="EXIT", reason=f"hora de cierre {p.flat_time:%H:%M} COT", price=mark)
+        return dict(action="EXIT", reason=f"hora de cierre {p.flat_time:%H:%M} ET", price=mark)
     if now - position["opened"] >= timedelta(minutes=p.hold_minutes):
         return dict(action="EXIT", reason=f"tiempo máximo {p.hold_minutes} min", price=mark)
     reg = regime(levels)

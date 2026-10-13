@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "legacy_0dte"))
 import decision as D  # noqa: E402
 
 F = json.loads((ROOT / "tests" / "fixtures" / "levels_spx_20261005.json").read_text())["levels"]
-NOW = datetime(2026, 10, 6, 9, 30)
+NOW = datetime(2026, 10, 6, 10, 30)
 P_US500 = D.Params(decimals=1)
 BASE = -1.0                                   # US500 − SPX
 FLAT = {"trades_today": 0, "pnl_today": 0.0, "position": None, "balance": 1000.0, "size": 0.64}
@@ -89,8 +89,8 @@ def test_plan_C_sell_momentum_to_put_wall():
 
 
 def test_gates():
-    assert run("B_7753", "B", now=datetime(2026, 10, 6, 8, 35))["action"] == "NO_TRADE"
-    assert run("B_7753", "B", now=datetime(2026, 10, 6, 10, 1))["action"] == "NO_TRADE"   # solo mañana
+    assert run("B_7753", "B", now=datetime(2026, 10, 6, 9, 35))["action"] == "NO_TRADE"
+    assert run("B_7753", "B", now=datetime(2026, 10, 6, 11, 1))["action"] == "NO_TRADE"   # solo mañana
     assert run("B_7753", "B", state={**FLAT, "trades_today": 3})["action"] == "NO_TRADE"
     assert run("B_7753", "B", state={**FLAT, "pnl_today": -20.0})["action"] == "NO_TRADE"
     assert run("B_7753", "B", state={**FLAT, "position": {"side": "BUY"}})["action"] == "HOLD"
@@ -143,7 +143,7 @@ def pos_B():
 
 
 def _live(bid, offer, minute):
-    return dict(bid=bid, offer=offer, base=BASE, now=datetime(2026, 10, 6, 9 + (30 + minute) // 60, (30 + minute) % 60))
+    return dict(bid=bid, offer=offer, base=BASE, now=datetime(2026, 10, 6, 10 + (30 + minute) // 60, (30 + minute) % 60))
 
 
 def test_manage_tp_stop_time(pos_B):
@@ -151,8 +151,8 @@ def test_manage_tp_stop_time(pos_B):
     assert D.manage(pos_B, L, _live(pos_B["tp"] + 0.1, pos_B["tp"] + 0.7, 10), P_US500)["reason"] == "TP alcanzado"
     assert D.manage(pos_B, L, _live(pos_B["stop"] - 0.1, pos_B["stop"] + 0.5, 10), P_US500)["reason"] == "stop alcanzado"
     assert "tiempo máximo" in D.manage(pos_B, L, _live(7755, 7755.6, 76), P_US500)["reason"]
-    late = dict(bid=7755, offer=7755.6, base=BASE, now=datetime(2026, 10, 6, 14, 45))
-    assert "14:45" in D.manage({**pos_B, "opened": datetime(2026, 10, 6, 14, 0)}, L, late, P_US500)["reason"]
+    late = dict(bid=7755, offer=7755.6, base=BASE, now=datetime(2026, 10, 6, 15, 45))
+    assert "15:45" in D.manage({**pos_B, "opened": datetime(2026, 10, 6, 15, 0)}, L, late, P_US500)["reason"]
 
 
 def test_manage_regime_flip_exits_mean_reversion(pos_B):

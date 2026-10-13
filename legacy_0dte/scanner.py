@@ -4,7 +4,7 @@ scanner.py — modo escáner multi-activo sobre la salida de legacy_0dte (levels
 Para cada ticker, en cada ciclo:
   1. Strike clave = entre los strikes atractivos (decision.attractive_strikes: picos de gamma bruta /
      |Net GEX|, muros) el de mayor gamma bruta × P(toque) en el tiempo que queda; empate → el más cercano.
-  2. Con el máximo/mínimo del CFD desde la apertura (08:30 COT) y la base (CFD = strike + base):
+  2. Con el máximo/mínimo del CFD desde la apertura (09:30 ET) y la base (CFD = strike + base):
      * NO tocado → candidato HACIA el strike (TP en el strike, stop estructural detrás del precio:
        el strike atractivo más cercano del otro lado ± stop_buffer). Si no pasa los filtros
        (P(toque) ≥ p_min y R:R ≥ rr_min) queda en espera y se reevalúa el ciclo siguiente.
